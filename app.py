@@ -1,5 +1,7 @@
 """
-FastAPI Prediction Server
+FastAPI Prediction Server (Password Protected)
+----------------------------------------------
+Password: 263
 Render.com par deploy karne ke liye ready.
 """
 
@@ -10,8 +12,8 @@ from typing import Optional
 
 app = FastAPI(
     title="Prediction API",
-    description="Simple FastAPI prediction server",
-    version="1.0.0"
+    description="Password protected prediction server",
+    version="2.0.0"
 )
 
 # CORS enable
@@ -22,6 +24,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ============================================================
+# 🔐 PASSWORD CONFIG
+# ============================================================
+API_PASSWORD = "263"
 
 
 # ============================================================
@@ -44,16 +52,46 @@ def run_prediction(period: Optional[int] = None) -> str:
 
 @app.get("/")
 def root():
+    """Server status (public — bina password ke)."""
     return {"status": "online"}
 
 
 @app.get("/predict")
-def predict(period: Optional[int] = Query(default=None)):
+def predict(
+    period: Optional[int] = Query(default=None, description="Previous period number"),
+    password: Optional[str] = Query(default=None, description="API password")
+):
+    """
+    Password protected prediction endpoint.
+
+    Usage:
+      /predict?password=263
+      /predict?period=12345&password=263
+    """
     try:
+        # 🔐 Password check
+        if password is None:
+            raise HTTPException(
+                status_code=401,
+                detail="Password required. Use ?password=YOUR_PASSWORD"
+            )
+
+        if password != API_PASSWORD:
+            raise HTTPException(
+                status_code=403,
+                detail="Invalid password"
+            )
+
+        # Validation
         if period is not None and period < 0:
-            raise HTTPException(status_code=400, detail="period must be >= 0")
+            raise HTTPException(
+                status_code=400,
+                detail="period must be a non-negative integer"
+            )
+
         result = run_prediction(period=period)
         return {"prediction": result}
+
     except HTTPException:
         raise
     except Exception as e:
