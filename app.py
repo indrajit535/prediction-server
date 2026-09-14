@@ -1,16 +1,16 @@
 """
 FastAPI Prediction Server — Wingo 1 Min Mode
 --------------------------------------------
-- Real history fetch from sky-predictor API
+- Real history fetch
 - Jons AI Predictor logic (Python version)
 - Password protected (263)
-- Real-time period + countdown
+- ✅ CACHE: Same period → Same prediction (bar bar change nahi hoga)
 """
 
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from typing import Optional
+from typing import Optional, Dict
 from datetime import datetime, timezone, timedelta
 import urllib.request
 import json
@@ -18,8 +18,8 @@ import random
 
 app = FastAPI(
     title="Wingo Prediction API",
-    description="Wingo 1M prediction server (password protected)",
-    version="3.0.0"
+    description="Wingo 1M prediction server (password protected + cached)",
+    version="3.1.0"
 )
 
 # CORS enable
@@ -47,7 +47,35 @@ IST = timezone(timedelta(hours=5, minutes=30))
 
 
 # ============================================================
-# 🕐 TIME HELPERS (JS ka getISTTime equivalent)
+# 🗄️ PREDICTION CACHE
+# ============================================================
+# Structure: { "period_number": { prediction_data } }
+# Same period → same prediction hamesha
+PREDICTION_CACHE: Dict[str, dict] = {}
+
+# Max cache size (memory leak na ho)
+MAX_CACHE_SIZE = 500
+
+
+def get_cached_prediction(period: str):
+    """Agar period ka prediction pehle se hai to wahi return karo."""
+    return PREDICTION_CACHE.get(period)
+
+
+def save_prediction_to_cache(period: str, data: dict):
+    """Prediction ko cache mein save karo."""
+    # Purani entries delete karo agar limit cross ho gayi
+    if len(PREDICTION_CACHE) >= MAX_CACHE_SIZE:
+        # Sabse purani 100 entries hata do
+        old_keys = list(PREDICTION_CACHE.keys())[:100]
+        for k in old_keys:
+            del PREDICTION_CACHE[k]
+
+    PREDICTION_CACHE[period] = data
+
+
+# ============================================================
+# 🕐 TIME HELPERS
 # ============================================================
 def get_ist_time():
     now = datetime.now(IST)
@@ -64,16 +92,13 @@ def get_ist_time():
 
 
 def get_current_period():
-    """Fallback local period generator (1 min mode)."""
     t = get_ist_time()
-    duration = 60
-    period_number = (t["total_seconds"] // duration) + 1
+    period_number = (t["total_seconds"] // 60) + 1
     padded = str(period_number).zfill(4)
     return f"{t['year']}{t['month']:02d}{t['day']:02d}1000{padded}"
 
 
 def get_remaining_seconds():
-    """Kitne second bache hain current period khatam hone mein."""
     t = get_ist_time()
     elapsed = t["total_seconds"] % 60
     return 60 - elapsed
@@ -83,7 +108,6 @@ def get_remaining_seconds():
 # 🌐 LIVE HISTORY FETCH
 # ============================================================
 def fetch_history():
-    """Sky-predictor API se live history fetch karo."""
     try:
         req = urllib.request.Request(
             HISTORY_API,
@@ -91,17 +115,12 @@ def fetch_history():
         )
         with urllib.request.urlopen(req, timeout=8) as resp:
             raw = resp.read().decode("utf-8")
-            data = json.loads(raw)
-            return data
+            return json.loads(raw)
     except Exception as e:
         return {"code": -1, "msg": str(e), "data": {"list": []}}
 
 
 def fetch_live_period():
-    """
-    Live period + remaining seconds.
-    History API se latest issueNumber leta hai + 1 karta hai (next period).
-    """
     data = fetch_history()
     lst = data.get("data", {}).get("list", [])
 
@@ -125,33 +144,44 @@ def fetch_live_period():
 
 
 # ============================================================
-# 🎯 JONS AI PREDICTOR 1-MIN (Python version)
+# 🎯 JONS AI PREDICTOR 1-MIN — CACHED
 # ============================================================
-def generate_prediction_1min(period: Optional[str] = None, game_id: str = "wingo_1min"):
+def generate_prediction_1min(period: Optional[str] = None,
+                              game_id: str = "wingo_1min",
+                              use_cache: bool = True):
     """
-    Aapka original JS logic ka Python conversion:
-      - BIG/SMALL: 48% BIG, 52% SMALL
-      - BIG → 5,6,7,8,9 | SMALL → 0,1,2,3,4
-      - Confidence: 98.2 - 99.9
+    Cached prediction generator.
+    
+    ✅ Agar is period ka prediction pehle se hai → WAHI return karega
+    ✅ Naya period → naya prediction banayega + cache mein save karega
     """
+
+    # Period determine karo
     if period is None:
         live = fetch_live_period()
         period = live["period"]
 
-    # Step 1: BIG ya SMALL
+    # 🔍 CACHE CHECK — sabse pehle
+    if use_cache:
+        cached = get_cached_prediction(period)
+        if cached is not None:
+            # Sirf timestamp update karo (fresh lagne ke liye)
+            cached["timestamp"] = int(datetime.now(timezone.utc).timestamp() * 1000)
+            cached["fromCache"] = True
+            return cached
+
+    # 🎲 NAYA PREDICTION generate karo (sirf naya period ke liye)
     big_small = "BIG" if random.random() > 0.48 else "SMALL"
 
-    # Step 2: Number
     if big_small == "BIG":
         number = random.choice([5, 6, 7, 8, 9])
     else:
         number = random.choice([0, 1, 2, 3, 4])
 
-    # Step 3: Confidence
     confidence = round(98.2 + random.random() * 1.7, 1)
     confidence = min(99.9, confidence)
 
-    return {
+    prediction = {
         "period": period,
         "gameId": game_id,
         "mode": "1m",
@@ -159,8 +189,15 @@ def generate_prediction_1min(period: Optional[str] = None, game_id: str = "wingo
         "numberResult": number,
         "confidence": confidence,
         "patternName": "QUANTUM 10-RESULTS MATRIX",
-        "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)
+        "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000),
+        "fromCache": False
     }
+
+    # 💾 CACHE MEIN SAVE KARO
+    if use_cache:
+        save_prediction_to_cache(period, prediction)
+
+    return prediction
 
 
 # ============================================================
@@ -199,12 +236,16 @@ def get_prediction_images(prediction):
 
 @app.get("/")
 def root():
-    return {"status": "online", "mode": "wingo-1m", "version": "3.0.0"}
+    return {
+        "status": "online",
+        "mode": "wingo-1m",
+        "version": "3.1.0",
+        "cachedPeriods": len(PREDICTION_CACHE)
+    }
 
 
 @app.get("/period")
 def period_info(password: Optional[str] = Query(default=None)):
-    """Real-time period + countdown (password protected)."""
     if password != API_PASSWORD:
         raise HTTPException(status_code=403, detail="Invalid password")
 
@@ -218,7 +259,6 @@ def period_info(password: Optional[str] = Query(default=None)):
 
 @app.get("/history")
 def history(password: Optional[str] = Query(default=None)):
-    """Last 100 results from live API."""
     if password != API_PASSWORD:
         raise HTTPException(status_code=403, detail="Invalid password")
 
@@ -229,29 +269,25 @@ def history(password: Optional[str] = Query(default=None)):
 
 @app.get("/predict")
 def predict(
-    period: Optional[str] = Query(default=None, description="Target period (optional)"),
-    password: Optional[str] = Query(default=None, description="API password")
+    period: Optional[str] = Query(default=None),
+    password: Optional[str] = Query(default=None)
 ):
     """
-    Password protected prediction.
+    Password protected prediction (CACHED per period).
 
-    Usage:
-      /predict?password=263
-      /predict?period=20260914100010530&password=263
+    Same period → same prediction (kitni bhi baar refresh karo)
     """
     try:
-        # Password check
         if password is None:
             raise HTTPException(status_code=401, detail="Password required")
         if password != API_PASSWORD:
             raise HTTPException(status_code=403, detail="Invalid password")
 
-        # Prediction generate
         pred = generate_prediction_1min(period=period)
         images = get_prediction_images(pred)
 
         return {
-            "prediction": pred["bigSmallResult"],   # "BIG" | "SMALL" (simple)
+            "prediction": pred["bigSmallResult"],
             "period": pred["period"],
             "number": pred["numberResult"],
             "confidence": pred["confidence"],
@@ -259,7 +295,8 @@ def predict(
             "patternName": pred["patternName"],
             "bigSmallImage": images["bigSmallImage"],
             "numberImage": images["numberImage"],
-            "timestamp": pred["timestamp"]
+            "timestamp": pred["timestamp"],
+            "fromCache": pred.get("fromCache", False)
         }
 
     except HTTPException:
@@ -274,8 +311,8 @@ def predict(
 @app.get("/predict-full")
 def predict_full(password: Optional[str] = Query(default=None)):
     """
-    Full prediction + live period + countdown + last 10 history.
-    Ek hi call mein sab kuch — mobile app ke liye best.
+    Full prediction + live period + countdown + history.
+    Same period par same prediction (cached).
     """
     if password is None:
         raise HTTPException(status_code=401, detail="Password required")
@@ -296,7 +333,8 @@ def predict_full(password: Optional[str] = Query(default=None)):
             "period": pred["period"],
             "patternName": pred["patternName"],
             "bigSmallImage": images["bigSmallImage"],
-            "numberImage": images["numberImage"]
+            "numberImage": images["numberImage"],
+            "fromCache": pred.get("fromCache", False)
         },
         "live": {
             "period": live["period"],
@@ -306,6 +344,32 @@ def predict_full(password: Optional[str] = Query(default=None)):
         "history": last10,
         "timestamp": pred["timestamp"]
     }
+
+
+# ============================================================
+# 🧹 CACHE MANAGEMENT (optional debug endpoints)
+# ============================================================
+@app.get("/cache-info")
+def cache_info(password: Optional[str] = Query(default=None)):
+    """Cache ki current state dekho."""
+    if password != API_PASSWORD:
+        raise HTTPException(status_code=403, detail="Invalid password")
+
+    return {
+        "cachedPeriods": len(PREDICTION_CACHE),
+        "maxSize": MAX_CACHE_SIZE,
+        "periods": list(PREDICTION_CACHE.keys())[-20:]  # last 20
+    }
+
+
+@app.get("/cache-clear")
+def cache_clear(password: Optional[str] = Query(default=None)):
+    """Cache saaf karo (testing ke liye)."""
+    if password != API_PASSWORD:
+        raise HTTPException(status_code=403, detail="Invalid password")
+
+    PREDICTION_CACHE.clear()
+    return {"status": "cleared"}
 
 
 if __name__ == "__main__":
