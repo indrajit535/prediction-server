@@ -50,7 +50,7 @@ app.add_middleware(
 # ============================================================
 # 🔐 ADMIN PASSWORD (Firebase se bhi control kar sakte ho)
 # ============================================================
-ADMIN_PASSWORD = "263"   # Admin panel login password
+ADMIN_PASSWORD = "263@"   # Admin panel login password
 
 
 # ============================================================
