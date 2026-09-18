@@ -1,16 +1,16 @@
 """
-FastAPI Prediction Server — Wingo 1 Min Mode (v4.0)
-----------------------------------------------------
+FastAPI Prediction Server — Wingo 1 Min Mode (v4.1 FIXED)
+----------------------------------------------------------
 ✅ Firebase Integration (Key validation, Server status, Withdrawal)
 ✅ Admin Panel Control
 ✅ User Panel Auto Login/Logout
-✅ New SDDGAMER263@ Prediction Algorithm
+✅ SDDGAMER263 Prediction Algorithm
 ✅ Same period → Same prediction (cached)
 """
 
 from fastapi import FastAPI, Query, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from typing import Optional, Dict
 from datetime import datetime, timezone, timedelta
@@ -28,29 +28,35 @@ from firebase_config import (
     get_user_withdrawals,
     get_user_balance,
     update_user_balance,
+    init_firebase,
 )
-from prediction_engine import sddgamer263@_predict
+
+# ✅ FIXED IMPORT — ye add kiya
+from prediction_engine import sddgamer263_predict
+
+# Firebase init on startup
+init_firebase()
 
 app = FastAPI(
     title="Wingo Prediction API",
     description="Wingo 1M prediction server with Firebase auth + new algorithm",
-    version="4.0.0"
+    version="4.1.0"
 )
 
-# CORS enable
+# CORS — credentials False kyunki origin "*" hai
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
 # ============================================================
-# 🔐 ADMIN PASSWORD (Firebase se bhi control kar sakte ho)
+# 🔐 ADMIN PASSWORD
 # ============================================================
-ADMIN_PASSWORD = "263@@"   # Admin panel login password
+ADMIN_PASSWORD = "263@@"
 
 
 # ============================================================
@@ -144,7 +150,7 @@ def get_last_result_number():
 
 
 # ============================================================
-# 🎯 NEW PREDICTION (SDDGAMER263@) — CACHED
+# 🎯 NEW PREDICTION (SDDGAMER263) — CACHED
 # ============================================================
 def generate_prediction(period: Optional[str] = None,
                         game_id: str = "wingo_1min",
@@ -153,7 +159,6 @@ def generate_prediction(period: Optional[str] = None,
         live = fetch_live_period()
         period = live["period"]
 
-    # Cache check
     if use_cache:
         cached = get_cached_prediction(period)
         if cached is not None:
@@ -161,9 +166,10 @@ def generate_prediction(period: Optional[str] = None,
             cached["fromCache"] = True
             return cached
 
-    # New prediction using SDDGAMER263@
     last_number = get_last_result_number()
-    result = sddgamer263@_predict(current_number=last_number, period=period)
+
+    # ✅ NEW PREDICTION ENGINE
+    result = sddgamer263_predict(current_number=last_number, period=period)
 
     prediction = {
         "period": period,
@@ -171,9 +177,10 @@ def generate_prediction(period: Optional[str] = None,
         "mode": "1m",
         "bigSmallResult": result["bigSmall"],
         "numberResult": result["prediction"],
+        "numbers": result.get("numbers", [result["prediction"]]),
         "confidence": result["confidence"],
-        "patternName": "SDDGAMER263@ QUANTUM MATRIX",
-        "steps": result["steps"],
+        "patternName": "SDDGAMER263 QUANTUM MATRIX v11",
+        "steps": result.get("steps", []),
         "inputNumber": last_number,
         "timestamp": int(time.time() * 1000),
         "fromCache": False
@@ -209,25 +216,27 @@ ASSETS = {
 
 
 def get_prediction_images(prediction):
+    bs = prediction["bigSmallResult"]
+    num = prediction["numberResult"]
     return {
-        "bigSmallImage": ASSETS["bigSmall"][prediction["bigSmallResult"]],
-        "numberImage": ASSETS["numbers"][prediction["numberResult"]]
+        "bigSmallImage": ASSETS["bigSmall"].get(bs, ASSETS["bigSmall"]["BIG"]),
+        "numberImage": ASSETS["numbers"][num] if 0 <= num < len(ASSETS["numbers"]) else ASSETS["numbers"][0]
     }
 
 
 # ============================================================
-# 🔐 KEY VALIDATION DEPENDENCY
+# 🔐 VALIDATION HELPERS
 # ============================================================
 def validate_key_or_raise(key: str):
-    """Key validate karo, warna HTTPException raise karo."""
+    if not key:
+        raise HTTPException(status_code=400, detail="Key required")
     status = check_key_active(key)
     if not status["active"]:
         raise HTTPException(status_code=403, detail=status["reason"])
-    return status["data"]
+    return status.get("data") or {}
 
 
 def check_server_online_or_raise():
-    """Server status check karo."""
     status = get_server_status()
     if not status["online"]:
         raise HTTPException(status_code=503, detail=status["message"])
@@ -237,59 +246,50 @@ def check_server_online_or_raise():
 # ============================================================
 # 🚀 PUBLIC ENDPOINTS
 # ============================================================
-
 @app.get("/")
 def root():
     return {
         "status": "online",
         "mode": "wingo-1m",
-        "version": "4.0.0",
+        "version": "4.1.0",
+        "engine": "ULTIMATE v11.0",
         "cachedPeriods": len(PREDICTION_CACHE)
     }
 
 
 @app.get("/firebase-config")
 def firebase_config():
-    """Client-side Firebase config (public)."""
     return FIREBASE_WEB_CONFIG
 
 
 @app.get("/server-status")
 def server_status():
-    """Server on/off status check."""
     return get_server_status()
 
 
 # ============================================================
 # 🔑 KEY AUTH ENDPOINTS
 # ============================================================
-
 @app.post("/auth/login")
 async def auth_login(request: Request):
-    """
-    User login with key.
-    Body: {"key": "USER_KEY"}
-    """
     try:
         body = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
 
-    key = body.get("key", "").strip()
+    key = (body.get("key") or "").strip()
     if not key:
         raise HTTPException(status_code=400, detail="Key required")
 
-    # Server status check
     srv = get_server_status()
     if not srv["online"]:
         raise HTTPException(status_code=503, detail=srv["message"])
 
-    # Key validation
     status = check_key_active(key)
     if not status["active"]:
         raise HTTPException(status_code=403, detail=status["reason"])
 
-    data = status["data"]
+    data = status.get("data") or {}
     return {
         "success": True,
         "message": "Login successful",
@@ -302,9 +302,6 @@ async def auth_login(request: Request):
 
 @app.get("/auth/check")
 def auth_check(key: str = Query(...)):
-    """
-    Har 3 sec check ke liye — key active hai ya nahi + server status.
-    """
     srv = get_server_status()
     if not srv["online"]:
         return {
@@ -314,7 +311,7 @@ def auth_check(key: str = Query(...)):
         }
 
     status = check_key_active(key)
-    data = status["data"] or {}
+    data = status.get("data") or {}
     return {
         "active": status["active"],
         "serverOnline": True,
@@ -325,9 +322,8 @@ def auth_check(key: str = Query(...)):
 
 
 # ============================================================
-# 🎯 PREDICTION ENDPOINTS (Key protected)
+# 🎯 PREDICTION ENDPOINTS
 # ============================================================
-
 @app.get("/period")
 def period_info(key: str = Query(...)):
     validate_key_or_raise(key)
@@ -362,6 +358,7 @@ def predict(
         "prediction": pred["bigSmallResult"],
         "period": pred["period"],
         "number": pred["numberResult"],
+        "numbers": pred.get("numbers", [pred["numberResult"]]),
         "confidence": pred["confidence"],
         "mode": pred["mode"],
         "patternName": pred["patternName"],
@@ -381,6 +378,7 @@ def predict_full(key: str = Query(...)):
     live = fetch_live_period()
     pred = generate_prediction(period=live["period"])
     images = get_prediction_images(pred)
+
     history_data = fetch_history()
     last10 = history_data.get("data", {}).get("list", [])[:10]
 
@@ -388,6 +386,7 @@ def predict_full(key: str = Query(...)):
         "prediction": {
             "bigSmall": pred["bigSmallResult"],
             "number": pred["numberResult"],
+            "numbers": pred.get("numbers", [pred["numberResult"]]),
             "confidence": pred["confidence"],
             "period": pred["period"],
             "patternName": pred["patternName"],
@@ -407,9 +406,8 @@ def predict_full(key: str = Query(...)):
 
 
 # ============================================================
-# 💰 WITHDRAWAL ENDPOINTS (User)
+# 💰 WITHDRAWAL ENDPOINTS
 # ============================================================
-
 @app.get("/withdrawal/balance")
 def withdrawal_balance(key: str = Query(...)):
     validate_key_or_raise(key)
@@ -418,16 +416,16 @@ def withdrawal_balance(key: str = Query(...)):
 
 @app.post("/withdrawal/request")
 async def withdrawal_request(request: Request):
-    """
-    Body: {"key": "...", "amount": 100, "method": "UPI", "account": "user@upi"}
-    """
     try:
         body = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
 
-    key = body.get("key", "").strip()
-    amount = float(body.get("amount", 0))
+    key = (body.get("key") or "").strip()
+    try:
+        amount = float(body.get("amount", 0))
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid amount")
     method = body.get("method", "UPI")
     account = body.get("account", "")
 
@@ -462,7 +460,6 @@ def withdrawal_history(key: str = Query(...)):
 # ============================================================
 # 🛡️ ADMIN ENDPOINTS
 # ============================================================
-
 def _check_admin(password: str):
     if password != ADMIN_PASSWORD:
         raise HTTPException(status_code=403, detail="Invalid admin password")
@@ -470,23 +467,19 @@ def _check_admin(password: str):
 
 @app.get("/admin/keys")
 def admin_list_keys(password: str = Query(...)):
-    """Saari keys list karo."""
     _check_admin(password)
     from firebase_config import _rest_get
     data = _rest_get("keys") or {}
     keys = []
     for k, v in data.items():
-        keys.append({"key": k, **v})
+        if isinstance(v, dict):
+            keys.append({"key": k, **v})
     keys.sort(key=lambda x: x.get("createdAt", 0), reverse=True)
     return {"count": len(keys), "keys": keys}
 
 
 @app.post("/admin/keys/create")
 async def admin_create_key(request: Request):
-    """
-    Body: {"password": "263@", "key": "...", "durationDays": 30, "balance": 0}
-    Agar key na diya jaaye to auto-generate karega.
-    """
     try:
         body = await request.json()
     except Exception:
@@ -494,7 +487,7 @@ async def admin_create_key(request: Request):
 
     _check_admin(body.get("password", ""))
 
-    key = body.get("key", "").strip()
+    key = (body.get("key") or "").strip()
     if not key:
         key = "MAXMOD" + "".join(random.choices("ABCDEFGHJKLMNPQRSTUVWXYZ23456789", k=10))
 
@@ -522,14 +515,13 @@ async def admin_create_key(request: Request):
 
 @app.post("/admin/keys/delete")
 async def admin_delete_key(request: Request):
-    """Body: {"password": "263@", "key": "..."}"""
     try:
         body = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
 
     _check_admin(body.get("password", ""))
-    key = body.get("key", "").strip()
+    key = (body.get("key") or "").strip()
     if not key:
         raise HTTPException(status_code=400, detail="Key required")
 
@@ -543,14 +535,13 @@ async def admin_delete_key(request: Request):
 
 @app.post("/admin/keys/toggle")
 async def admin_toggle_key(request: Request):
-    """Body: {"password": "263@", "key": "...", "active": true/false}"""
     try:
         body = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
 
     _check_admin(body.get("password", ""))
-    key = body.get("key", "").strip()
+    key = (body.get("key") or "").strip()
     active = bool(body.get("active", True))
 
     from firebase_config import _rest_patch
@@ -563,14 +554,13 @@ async def admin_toggle_key(request: Request):
 
 @app.post("/admin/keys/balance")
 async def admin_update_balance(request: Request):
-    """Body: {"password": "263@", "key": "...", "balance": 500}"""
     try:
         body = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
 
     _check_admin(body.get("password", ""))
-    key = body.get("key", "").strip()
+    key = (body.get("key") or "").strip()
     balance = float(body.get("balance", 0))
 
     ok = update_user_balance(key, balance)
@@ -582,10 +572,6 @@ async def admin_update_balance(request: Request):
 
 @app.post("/admin/server/toggle")
 async def admin_server_toggle(request: Request):
-    """
-    Body: {"password": "263@", "online": true/false, "message": "..."}
-    Server on/off karo.
-    """
     try:
         body = await request.json()
     except Exception:
@@ -609,28 +595,24 @@ async def admin_server_toggle(request: Request):
 
 @app.get("/admin/withdrawals")
 def admin_list_withdrawals(password: str = Query(...)):
-    """Saari withdrawal requests list karo."""
     _check_admin(password)
     from firebase_config import _rest_get
     data = _rest_get("withdrawals") or {}
-    reqs = list(data.values())
+    reqs = [v for v in data.values() if isinstance(v, dict)]
     reqs.sort(key=lambda x: x.get("createdAt", 0), reverse=True)
     return {"count": len(reqs), "requests": reqs}
 
 
 @app.post("/admin/withdrawals/action")
 async def admin_withdrawal_action(request: Request):
-    """
-    Body: {"password": "263@", "requestId": "WD...", "action": "accept"/"reject"}
-    """
     try:
         body = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
 
     _check_admin(body.get("password", ""))
-    req_id = body.get("requestId", "").strip()
-    action = body.get("action", "").strip().lower()
+    req_id = (body.get("requestId") or "").strip()
+    action = (body.get("action") or "").strip().lower()
 
     if action not in ("accept", "reject"):
         raise HTTPException(status_code=400, detail="Action must be 'accept' or 'reject'")
@@ -649,7 +631,6 @@ async def admin_withdrawal_action(request: Request):
         "processedAt": int(time.time() * 1000)
     })
 
-    # Agar accept hua to balance deduct karo
     if action == "accept":
         key = req.get("key")
         amount = float(req.get("amount", 0))
@@ -662,7 +643,6 @@ async def admin_withdrawal_action(request: Request):
 
 @app.get("/admin/stats")
 def admin_stats(password: str = Query(...)):
-    """Admin dashboard stats."""
     _check_admin(password)
     from firebase_config import _rest_get
     keys_data = _rest_get("keys") or {}
@@ -670,12 +650,17 @@ def admin_stats(password: str = Query(...)):
     srv = get_server_status()
 
     total_keys = len(keys_data)
-    active_keys = sum(1 for v in keys_data.values() if v.get("active") and not v.get("deleted"))
-    total_balance = sum(float(v.get("balance", 0)) for v in keys_data.values())
+    active_keys = sum(1 for v in keys_data.values()
+                      if isinstance(v, dict) and v.get("active") and not v.get("deleted"))
+    total_balance = sum(float(v.get("balance", 0)) for v in keys_data.values()
+                        if isinstance(v, dict))
 
-    pending_wds = sum(1 for v in wd_data.values() if v.get("status") == "pending")
-    accepted_wds = sum(1 for v in wd_data.values() if v.get("status") == "accepted")
-    rejected_wds = sum(1 for v in wd_data.values() if v.get("status") == "rejected")
+    pending_wds = sum(1 for v in wd_data.values()
+                      if isinstance(v, dict) and v.get("status") == "pending")
+    accepted_wds = sum(1 for v in wd_data.values()
+                       if isinstance(v, dict) and v.get("status") == "accepted")
+    rejected_wds = sum(1 for v in wd_data.values()
+                       if isinstance(v, dict) and v.get("status") == "rejected")
 
     return {
         "totalKeys": total_keys,
@@ -694,7 +679,6 @@ def admin_stats(password: str = Query(...)):
 # ============================================================
 # 🧹 CACHE MANAGEMENT
 # ============================================================
-
 @app.get("/cache-info")
 def cache_info(password: str = Query(...)):
     _check_admin(password)
@@ -715,7 +699,6 @@ def cache_clear(password: str = Query(...)):
 # ============================================================
 # 🖼️ STATIC PANELS
 # ============================================================
-# Agar static folder exist kare to mount karo
 if os.path.isdir("static"):
     app.mount("/panel", StaticFiles(directory="static", html=True), name="static")
 
