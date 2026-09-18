@@ -4,7 +4,7 @@ FastAPI Prediction Server — Wingo 1 Min Mode (v4.0)
 ✅ Firebase Integration (Key validation, Server status, Withdrawal)
 ✅ Admin Panel Control
 ✅ User Panel Auto Login/Logout
-✅ New SDDGAMER263 Prediction Algorithm
+✅ New SDDGAMER263@ Prediction Algorithm
 ✅ Same period → Same prediction (cached)
 """
 
@@ -29,7 +29,7 @@ from firebase_config import (
     get_user_balance,
     update_user_balance,
 )
-from prediction_engine import sddgamer263_predict
+from prediction_engine import sddgamer263@_predict
 
 app = FastAPI(
     title="Wingo Prediction API",
@@ -50,7 +50,7 @@ app.add_middleware(
 # ============================================================
 # 🔐 ADMIN PASSWORD (Firebase se bhi control kar sakte ho)
 # ============================================================
-ADMIN_PASSWORD = "263@"   # Admin panel login password
+ADMIN_PASSWORD = "263@@"   # Admin panel login password
 
 
 # ============================================================
@@ -144,7 +144,7 @@ def get_last_result_number():
 
 
 # ============================================================
-# 🎯 NEW PREDICTION (SDDGAMER263) — CACHED
+# 🎯 NEW PREDICTION (SDDGAMER263@) — CACHED
 # ============================================================
 def generate_prediction(period: Optional[str] = None,
                         game_id: str = "wingo_1min",
@@ -161,9 +161,9 @@ def generate_prediction(period: Optional[str] = None,
             cached["fromCache"] = True
             return cached
 
-    # New prediction using SDDGAMER263
+    # New prediction using SDDGAMER263@
     last_number = get_last_result_number()
-    result = sddgamer263_predict(current_number=last_number, period=period)
+    result = sddgamer263@_predict(current_number=last_number, period=period)
 
     prediction = {
         "period": period,
@@ -172,7 +172,7 @@ def generate_prediction(period: Optional[str] = None,
         "bigSmallResult": result["bigSmall"],
         "numberResult": result["prediction"],
         "confidence": result["confidence"],
-        "patternName": "SDDGAMER263 QUANTUM MATRIX",
+        "patternName": "SDDGAMER263@ QUANTUM MATRIX",
         "steps": result["steps"],
         "inputNumber": last_number,
         "timestamp": int(time.time() * 1000),
@@ -484,7 +484,7 @@ def admin_list_keys(password: str = Query(...)):
 @app.post("/admin/keys/create")
 async def admin_create_key(request: Request):
     """
-    Body: {"password": "263", "key": "...", "durationDays": 30, "balance": 0}
+    Body: {"password": "263@", "key": "...", "durationDays": 30, "balance": 0}
     Agar key na diya jaaye to auto-generate karega.
     """
     try:
@@ -522,7 +522,7 @@ async def admin_create_key(request: Request):
 
 @app.post("/admin/keys/delete")
 async def admin_delete_key(request: Request):
-    """Body: {"password": "263", "key": "..."}"""
+    """Body: {"password": "263@", "key": "..."}"""
     try:
         body = await request.json()
     except Exception:
@@ -543,7 +543,7 @@ async def admin_delete_key(request: Request):
 
 @app.post("/admin/keys/toggle")
 async def admin_toggle_key(request: Request):
-    """Body: {"password": "263", "key": "...", "active": true/false}"""
+    """Body: {"password": "263@", "key": "...", "active": true/false}"""
     try:
         body = await request.json()
     except Exception:
@@ -563,7 +563,7 @@ async def admin_toggle_key(request: Request):
 
 @app.post("/admin/keys/balance")
 async def admin_update_balance(request: Request):
-    """Body: {"password": "263", "key": "...", "balance": 500}"""
+    """Body: {"password": "263@", "key": "...", "balance": 500}"""
     try:
         body = await request.json()
     except Exception:
@@ -583,7 +583,7 @@ async def admin_update_balance(request: Request):
 @app.post("/admin/server/toggle")
 async def admin_server_toggle(request: Request):
     """
-    Body: {"password": "263", "online": true/false, "message": "..."}
+    Body: {"password": "263@", "online": true/false, "message": "..."}
     Server on/off karo.
     """
     try:
@@ -621,7 +621,7 @@ def admin_list_withdrawals(password: str = Query(...)):
 @app.post("/admin/withdrawals/action")
 async def admin_withdrawal_action(request: Request):
     """
-    Body: {"password": "263", "requestId": "WD...", "action": "accept"/"reject"}
+    Body: {"password": "263@", "requestId": "WD...", "action": "accept"/"reject"}
     """
     try:
         body = await request.json()
