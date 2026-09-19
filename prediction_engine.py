@@ -1,10 +1,9 @@
 """
 ============================================================
-  ULTIMATE WINGO PREDICTION ENGINE v11.0 — 100% NEW
-  14 Engines Combined:
-  Dragon + Zigzag + 1-1 + 2-2 + 3-3 + 4-4 + 1+3 + Mirror
-  + Triangle + N-Gram + Markov + Fibonacci + 30-Ratio
-  + Ultimate-Pro + RENOX Quantum
+  WINGO PREDICTION ENGINE v12.0 — NEW LOGIC
+  Two Detectors:
+    1. Alternating Pattern Detector
+    2. Dragon Streak Detector
 ============================================================
 """
 
@@ -21,68 +20,19 @@ API_URL = "https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json
 
 CONFIG = {
     "HISTORY_LIMIT": 50,
-    "MIN_CONFIDENCE": 72,
-    "MAX_CONFIDENCE": 99,
-    "EMERGENCY_WAIT": 1,
-    "BREAK_STREAK": 1,
-    "FIB": [0, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610],
-    "PRIMES": [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37],
+    "ALT_PATTERN_MIN": 4,      # minimum N for alternating check
+    "ALT_PATTERN_MAX": 8,      # maximum N for alternating check
+    "DRAGON_THRESHOLD": 4,     # streak >= this = DRAGON
+    "STRONG_THRESHOLD": 3,     # streak == this = STRONG
+    "STREAK_THRESHOLD": 2,     # streak == this = STREAK
 }
 
 BIG_POOL = [5, 6, 7, 8, 9]
 SMALL_POOL = [0, 1, 2, 3, 4]
 
-SAFE_POOLS = {
-    "BIG_HIGH": [8, 9, 7],
-    "SMALL_HIGH": [1, 2, 3],
-    "BIG_CRITICAL": [8, 9],
-    "SMALL_CRITICAL": [1, 2],
-    "BIG_ULTRA": [8],
-    "SMALL_ULTRA": [1],
-}
 
 # ============================================================
-# SECTION 2: PATTERN DATABASE
-# ============================================================
-PATTERNS_DB = {
-    'B': ('S', 50), 'S': ('B', 50),
-    'BB': ('S', 60), 'SS': ('B', 60),
-    'BS': ('B', 55), 'SB': ('S', 55),
-    'BBB': ('S', 78), 'SSS': ('B', 78),
-    'BBS': ('B', 70), 'SSB': ('S', 70),
-    'BSB': ('S', 74), 'SBS': ('B', 74),
-    'BSS': ('B', 69), 'SBB': ('S', 69),
-    'BBBB': ('S', 88), 'SSSS': ('B', 88),
-    'BBBS': ('S', 76), 'SSSB': ('B', 76),
-    'BBSB': ('S', 74), 'SSBS': ('B', 74),
-    'BSBB': ('S', 74), 'SBSS': ('B', 74),
-    'BSBS': ('S', 78), 'SBSB': ('B', 78),
-    'BBSS': ('B', 70), 'SSBB': ('S', 70),
-    'BBBBB': ('S', 92), 'SSSSS': ('B', 92),
-    'BBBBS': ('S', 80), 'SSSSB': ('B', 80),
-    'BBSBB': ('S', 78), 'SSBSS': ('B', 78),
-    'BSBBB': ('S', 79), 'SBSSS': ('B', 79),
-    'BBBBBB': ('S', 95), 'SSSSSS': ('B', 95),
-    'BBBBBS': ('S', 84), 'SSSSSB': ('B', 84),
-    'BBBBBBB': ('S', 97), 'SSSSSSS': ('B', 97),
-    'BBBBBBBB': ('S', 98), 'SSSSSSSS': ('B', 98),
-    'BSBSBS': ('B', 82), 'SBSBSB': ('S', 82),
-    'BSBSBSB': ('B', 86), 'SBSBSBS': ('S', 86),
-    'BSBSBSBS': ('B', 89), 'SBSBSBSB': ('S', 89),
-    'BBSBBS': ('S', 76), 'SSBSSB': ('B', 76),
-    'BBSSBB': ('S', 74), 'SSBBSS': ('B', 74),
-    'BSSSB': ('S', 78), 'SBBBS': ('B', 78),
-    'SBBB': ('S', 90), 'BSSS': ('B', 90),
-    'SSSB': ('S', 88), 'BBBS': ('B', 88),
-    'BBBSSS': ('B', 86), 'SSSBBB': ('S', 86),
-    'BBBBSSSS': ('B', 90), 'SSSSBBBB': ('S', 90),
-    'BBSSB': ('B', 82), 'SSBBS': ('S', 82),
-    'BSS': ('B', 84), 'SBB': ('S', 84),
-}
-
-
-# ============================================================
-# SECTION 3: UTILITY FUNCTIONS
+# SECTION 2: UTILITY FUNCTIONS
 # ============================================================
 def get_size(num):
     return "BIG" if int(num) >= 5 else "SMALL"
@@ -92,390 +42,196 @@ def to_bs(num):
     return "B" if int(num) >= 5 else "S"
 
 
-def digit_sum(n):
-    return sum(int(d) for d in str(abs(int(n))))
-
-
-def reverse_digits(n):
-    return int(str(abs(int(n)))[::-1])
+def bs_to_side(bs):
+    return "BIG" if bs == "B" else "SMALL"
 
 
 # ============================================================
-# SECTION 4: PATTERN DETECTORS
+# SECTION 3: ALTERNATING PATTERN DETECTOR
 # ============================================================
-def detect_dragon(seq):
+def detect_alternating(seq, n=None):
+    """
+    STEP 1: Store last N (4-8) completed results.
+    STEP 2: Check alternation.
+    STEP 3: If alternating → Pattern Type = ALTERNATING / REVERSE ALTERNATING
+    STEP 4: Next Expected = opposite of last element.
+    STEP 5: If NOT alternating → PATTERN BREAK / NO CLEAR PATTERN, Next = null
+    STEP 6: Strength = (alternating transitions / (N-1)) × 100
+    """
     if not seq:
-        return None
-    streak = 1
-    for i in range(1, min(len(seq), 12)):
-        if seq[i] == seq[0]:
-            streak += 1
-        else:
-            break
-    if streak >= 4:
-        return {"side": "SMALL" if seq[0] == "B" else "BIG",
-                "confidence": min(97, 75 + streak * 3),
-                "pattern": f"DRAGON_BREAK_{streak}"}
-    if streak == 3:
-        return {"side": "BIG" if seq[0] == "B" else "SMALL",
-                "confidence": 82, "pattern": "TRIPLE_REVERSAL"}
-    return None
-
-
-def detect_zigzag(seq):
-    if len(seq) < 4:
-        return None
-    alt = all(seq[i] != seq[i + 1] for i in range(min(7, len(seq) - 1)))
-    if alt:
-        return {"side": "SMALL" if seq[0] == "B" else "BIG",
-                "confidence": 86, "pattern": "ZIGZAG"}
-    return None
-
-
-def detect_1_1_pattern(seq):
-    if len(seq) < 6:
-        return None
-    p6 = "".join(seq[:6])
-    if p6 in ("BSBSBS", "SBSBSB"):
-        return {"side": "SMALL" if seq[0] == "B" else "BIG",
-                "confidence": 84, "pattern": "1-1_ALT"}
-    return None
-
-
-def detect_2_2_pattern(seq):
-    if len(seq) < 4:
-        return None
-    p4 = "".join(seq[:4])
-    if p4 == "BBSS":
-        return {"side": "BIG", "confidence": 82, "pattern": "2-2_BBSS"}
-    if p4 == "SSBB":
-        return {"side": "SMALL", "confidence": 82, "pattern": "2-2_SSBB"}
-    return None
-
-
-def detect_3_3_pattern(seq):
-    if len(seq) < 6:
-        return None
-    p6 = "".join(seq[:6])
-    if p6 == "BBBSSS":
-        return {"side": "BIG", "confidence": 86, "pattern": "3-3_BBBSSS"}
-    if p6 == "SSSBBB":
-        return {"side": "SMALL", "confidence": 86, "pattern": "3-3_SSSBBB"}
-    return None
-
-
-def detect_4_4_pattern(seq):
-    if len(seq) < 8:
-        return None
-    p8 = "".join(seq[:8])
-    if p8 == "BBBBSSSS":
-        return {"side": "BIG", "confidence": 90, "pattern": "4-4_BBBBSSSS"}
-    if p8 == "SSSSBBBB":
-        return {"side": "SMALL", "confidence": 90, "pattern": "4-4_SSSSBBBB"}
-    return None
-
-
-def detect_1_3_pattern(seq):
-    if len(seq) < 4:
-        return None
-    p4 = "".join(seq[:4])
-    rules = {
-        "SBBB": ("SMALL", 90, "1S+3B_REVERSAL"),
-        "BSSS": ("BIG",   90, "1B+3S_REVERSAL"),
-        "SSSB": ("SMALL", 88, "3S+1B_TREND"),
-        "BBBS": ("BIG",   88, "3B+1S_TREND"),
-    }
-    if p4 in rules:
-        s, c, n = rules[p4]
-        return {"side": s, "confidence": c, "pattern": n}
-    return None
-
-
-def detect_mirror(seq):
-    if len(seq) < 8:
-        return None
-    s = "".join(seq[:13]) if len(seq) >= 13 else "".join(seq)
-    if s.startswith("SSSSBBSBBSSSS"):
-        return {"side": "BIG", "confidence": 92, "pattern": "MIRROR_FULL_BIG"}
-    if s.startswith("BBBBSSBSSBBBB"):
-        return {"side": "SMALL", "confidence": 92, "pattern": "MIRROR_FULL_SMALL"}
-    if s.startswith("SSSSBBSS"):
-        return {"side": "BIG", "confidence": 84, "pattern": "MIRROR_PARTIAL_BIG"}
-    if s.startswith("BBBBSSBB"):
-        return {"side": "SMALL", "confidence": 84, "pattern": "MIRROR_PARTIAL_SMALL"}
-    return None
-
-
-def detect_triangle(seq):
-    if len(seq) < 3:
-        return None
-    p3 = "".join(seq[:3])
-    if p3 == "BSS":
-        return {"side": "BIG", "confidence": 84, "pattern": "TRIANGLE_BSS"}
-    if p3 == "SBB":
-        return {"side": "SMALL", "confidence": 84, "pattern": "TRIANGLE_SBB"}
-    return None
-
-
-def detect_n_gram(seq):
-    if len(seq) < 3:
-        return None
-    seq_str = "".join(seq)
-    best = None
-    for length in range(min(8, len(seq_str)), 2, -1):
-        sub = seq_str[:length]
-        if sub in PATTERNS_DB:
-            side, conf = PATTERNS_DB[sub]
-            if best is None or conf > best["confidence"]:
-                best = {"side": side, "confidence": conf,
-                        "pattern": f"NGRAM_{sub}"}
-    return best
-
-
-def detect_markov(seq):
-    if len(seq) < 10:
-        return None
-    bs = "".join(seq)
-    t3 = defaultdict(lambda: {"B": 0, "S": 0})
-    for i in range(len(bs) - 3):
-        key = bs[i:i + 3]
-        t3[key][bs[i + 3]] += 1
-    key = bs[:3]
-    total = t3[key]["B"] + t3[key]["S"]
-    if total >= 2:
-        if t3[key]["B"] > t3[key]["S"]:
-            return {"side": "BIG",
-                    "confidence": min(95, 62 + int(t3[key]["B"] / total * 33)),
-                    "pattern": "MARKOV_B"}
-        elif t3[key]["S"] > t3[key]["B"]:
-            return {"side": "SMALL",
-                    "confidence": min(95, 62 + int(t3[key]["S"] / total * 33)),
-                    "pattern": "MARKOV_S"}
-    return None
-
-
-def detect_fibonacci(seq):
-    if len(seq) < 8:
-        return None
-    weights = [8, 5, 3, 2, 1, 1, 0, 0]
-    score = 0
-    for i in range(min(len(seq), 8)):
-        score += (1 if seq[i] == "B" else -1) * weights[i]
-    if abs(score) >= 10:
-        side = "BIG" if score > 0 else "SMALL"
-        return {"side": side, "confidence": min(92, 70 + abs(score)),
-                "pattern": f"FIB_{score}"}
-    return None
-
-
-def detect_ratio_30(seq):
-    if len(seq) < 20:
-        return None
-    recent = seq[:30]
-    bigs = recent.count("B")
-    ratio = bigs / len(recent)
-    if ratio >= 0.68:
-        return {"side": "SMALL",
-                "confidence": min(95, int(72 + (ratio - 0.5) * 60)),
-                "pattern": f"30RATIO_{int(ratio * 100)}"}
-    if ratio <= 0.32:
-        return {"side": "BIG",
-                "confidence": min(95, int(72 + (0.5 - ratio) * 60)),
-                "pattern": f"30RATIO_{int(ratio * 100)}"}
-    return None
-
-
-def detect_ultimate_pro(seq):
-    if len(seq) < 8:
-        return None
-    score = {"BIG": 0, "SMALL": 0}
-    if len(seq) >= 5 and seq[0] == seq[4] and seq[1] == seq[3]:
-        vote = "SMALL" if seq[0] == "B" else "BIG"
-        score[vote] += 5
-    fib_s = 0
-    for i in range(min(len(seq), 8)):
-        w = [8, 5, 3, 2, 1, 1, 0, 0][i]
-        fib_s += (1 if seq[i] == "B" else -1) * w
-    score["BIG" if fib_s > 0 else "SMALL"] += 3
-    streak = 1
-    for i in range(1, len(seq)):
-        if seq[i] == seq[0]:
-            streak += 1
-        else:
-            break
-    if streak >= 5:
-        score["SMALL" if seq[0] == "B" else "BIG"] += 5
-    diff = abs(score["BIG"] - score["SMALL"])
-    conf = 68 + min(30, int(diff * 5))
-    side = "BIG" if score["BIG"] >= score["SMALL"] else "SMALL"
-    return {"side": side, "confidence": conf, "pattern": "ULTIMATE_PRO"}
-
-
-def engine_renox_hyper(last_num, period_str):
-    try:
-        p_salt = int(str(period_str)[-3:]) if len(str(period_str)) >= 3 else 0
-    except (ValueError, TypeError):
-        p_salt = 0
-
-    digits = [int(d) for d in str(int(last_num)).zfill(5)]
-    fib = CONFIG["FIB"]
-    primes = CONFIG["PRIMES"]
-
-    A = (sum(digits[i] * fib[i + 5] for i in range(5)) + p_salt * 11) % 17
-    B = (A * primes[p_salt % 10] + (digits[0] ^ digits[4])) % 13
-    if B == 0:
-        B = 11
-    C = (((B << 3) | (B >> 2)) & 0xFF) % 19
-    D = ((19 - C) ^ (17 - A) ^ (13 + B)) % 11
-    E = reverse_digits(D * 23 + C * 7) % 13
-    F = digit_sum(E * fib[A % 10]) % 9 or 9
-    L = (A + B + C + D + E + F) % 10
-    final = (L + 3) % 10 if p_salt % 2 == 0 else (L * 7) % 10
-    final = abs(final) % 10
-
-    return {
-        "side": "BIG" if final >= 5 else "SMALL",
-        "number": final,
-        "confidence": min(99, max(80, 82 + (final * 2 - int(last_num) % 10))),
-        "pattern": f"RENOX_V21_{L}"
-    }
-
-
-# ============================================================
-# SECTION 5: ENSEMBLE VOTER
-# ============================================================
-def ensemble_vote(seq, last_num, period):
-    engines = [
-        (detect_dragon(seq),        1.6),
-        (detect_zigzag(seq),        1.5),
-        (detect_1_1_pattern(seq),   1.4),
-        (detect_2_2_pattern(seq),   1.4),
-        (detect_3_3_pattern(seq),   1.5),
-        (detect_4_4_pattern(seq),   1.6),
-        (detect_1_3_pattern(seq),   1.5),
-        (detect_mirror(seq),        1.5),
-        (detect_triangle(seq),      1.3),
-        (detect_n_gram(seq),        1.4),
-        (detect_markov(seq),        1.3),
-        (detect_fibonacci(seq),     1.2),
-        (detect_ratio_30(seq),      1.0),
-        (detect_ultimate_pro(seq),  1.4),
-    ]
-
-    renox = engine_renox_hyper(last_num, period)
-    engines.append((renox, 1.3))
-
-    big_score, small_score = 0.0, 0.0
-    votes = []
-    for res, weight in engines:
-        if not res:
-            continue
-        side = res.get("side")
-        conf = res.get("confidence", 70)
-        votes.append({
-            "engine": res.get("pattern", "?"),
-            "side": side,
-            "confidence": conf,
-            "weighted": round(conf * weight, 1)
-        })
-        if side == "BIG":
-            big_score += conf * weight
-        elif side == "SMALL":
-            small_score += conf * weight
-
-    total = big_score + small_score
-    if total == 0:
-        return {"side": "BIG", "confidence": 72, "votes": votes,
-                "big_score": 0, "small_score": 0}
-
-    final_side = "BIG" if big_score >= small_score else "SMALL"
-    confidence = int(min(99, max(72, (max(big_score, small_score) / total) * 100)))
-
-    return {
-        "side": final_side,
-        "confidence": confidence,
-        "votes": votes,
-        "big_score": round(big_score, 1),
-        "small_score": round(small_score, 1)
-    }
-
-
-# ============================================================
-# SECTION 6: ANTI-LOSS PROTECTION
-# ============================================================
-class AntiLoss:
-    def __init__(self):
-        self.consecutive_loss = 0
-        self.wait_rounds = 0
-        self.emergency = False
-        self.inverse = False
-        self.last_loss_side = None
-
-    def process(self, pred_side, pred_conf, last_num):
-        pred_conf = pred_conf if pred_conf is not None else 72
-
-        if self.consecutive_loss >= CONFIG["BREAK_STREAK"]:
-            if self.wait_rounds < CONFIG["EMERGENCY_WAIT"]:
-                self.wait_rounds += 1
-                return {
-                    "skip": True,
-                    "reason": f"EMERGENCY_WAIT_{self.wait_rounds}/{CONFIG['EMERGENCY_WAIT']}"
-                }
-            self.wait_rounds = 0
-            self.emergency = True
-            self.inverse = True
-
-            safe_side = "SMALL" if self.last_loss_side == "BIG" else "BIG"
-            safe_pool = SAFE_POOLS["SMALL_CRITICAL"] if safe_side == "SMALL" else SAFE_POOLS["BIG_CRITICAL"]
-            return {
-                "side": safe_side,
-                "number": safe_pool[0],
-                "confidence": 95,
-                "adjusted": True,
-                "reason": "EMERGENCY_RECOVERY",
-                "bet_size": 0.5
-            }
-
-        if pred_conf < CONFIG["MIN_CONFIDENCE"]:
-            return {"skip": True, "reason": f"LOW_CONF_{pred_conf}%"}
-
-        if self.inverse:
-            final = "SMALL" if pred_side == "BIG" else "BIG"
-            pool = SAFE_POOLS["SMALL_CRITICAL"] if final == "SMALL" else SAFE_POOLS["BIG_CRITICAL"]
-            return {
-                "side": final,
-                "number": pool[0],
-                "confidence": min(99, pred_conf + 5),
-                "adjusted": True,
-                "reason": "INVERSE_MODE",
-                "bet_size": 0.75
-            }
-
         return {
-            "side": pred_side,
-            "confidence": pred_conf,
-            "adjusted": False,
-            "reason": "NORMAL",
-            "bet_size": 1
+            "pattern_type": "NO DATA",
+            "strength": 0,
+            "next_expected": None,
+            "recent_pattern": [],
+            "is_alternating": False
         }
 
-    def settle(self, predicted_side, actual_num):
-        actual_side = get_size(actual_num)
-        if actual_side == predicted_side:
-            self.consecutive_loss = 0
-            self.emergency = False
-            self.inverse = False
-            return "WIN"
+    # Choose N between min and max
+    if n is None:
+        n = min(CONFIG["ALT_PATTERN_MAX"], max(CONFIG["ALT_PATTERN_MIN"], len(seq)))
+    n = min(n, len(seq))
+    recent = seq[:n]  # most recent first (as fetched)
+
+    # Reverse to chronological: oldest → newest
+    chrono = list(reversed(recent))
+
+    # STEP 2: Check alternation
+    is_alternating = True
+    transitions = 0
+    for i in range(1, len(chrono)):
+        if chrono[i] == chrono[i - 1]:
+            is_alternating = False
+            break
+        transitions += 1
+
+    total_transitions = len(chrono) - 1
+
+    # STEP 6: Strength
+    if is_alternating and total_transitions > 0:
+        strength = int((transitions / total_transitions) * 100)
+    else:
+        strength = 0
+
+    # STEP 3 & 4: Pattern type & next expected
+    if is_alternating:
+        if chrono[0] == "B":
+            pattern_type = "ALTERNATING"
         else:
-            self.consecutive_loss += 1
-            self.last_loss_side = predicted_side
-            return "LOSS"
+            pattern_type = "REVERSE ALTERNATING"
+
+        last = chrono[-1]
+        next_expected = "SMALL" if last == "B" else "BIG"
+    else:
+        pattern_type = "PATTERN BREAK / NO CLEAR PATTERN"
+        next_expected = None
+
+    return {
+        "pattern_type": pattern_type,
+        "strength": strength,
+        "next_expected": next_expected,
+        "recent_pattern": [bs_to_side(x) for x in recent],
+        "is_alternating": is_alternating
+    }
 
 
 # ============================================================
-# SECTION 7: NUMBER SELECTOR
+# SECTION 4: DRAGON STREAK DETECTOR
+# ============================================================
+def detect_dragon_streak(seq):
+    """
+    STEP 1: Maintain chronological array of completed results.
+    STEP 2: Calculate current streak.
+    STEP 3: Classify streak:
+            count == 1  → NO STREAK
+            count == 2  → STREAK DETECTED
+            count == 3  → STRONG STREAK
+            count >= 4  → DRAGON <SIDE> STRIKE
+    STEP 4: Direction = current streak side.
+    STEP 5: Strength = min(100, streak_count × 20) %
+    """
+    if not seq:
+        return {
+            "current_pattern": None,
+            "streak_count": 0,
+            "pattern_label": "NO DATA",
+            "strength": 0,
+            "dragon_strike": False,
+            "recent_history": [],
+            "direction": None
+        }
+
+    # seq is most recent first
+    current = seq[0]
+    streak_count = 1
+    for i in range(1, len(seq)):
+        if seq[i] == current:
+            streak_count += 1
+        else:
+            break
+
+    # STEP 3: Classify
+    if streak_count >= CONFIG["DRAGON_THRESHOLD"]:
+        pattern_label = f"DRAGON {bs_to_side(current)} STRIKE"
+        dragon_strike = True
+    elif streak_count == CONFIG["STRONG_THRESHOLD"]:
+        pattern_label = "STRONG STREAK"
+        dragon_strike = False
+    elif streak_count == CONFIG["STREAK_THRESHOLD"]:
+        pattern_label = "STREAK DETECTED"
+        dragon_strike = False
+    else:
+        pattern_label = "NO STREAK"
+        dragon_strike = False
+
+    # STEP 5: Strength
+    strength = min(100, streak_count * 20)
+
+    # Recent history (most recent first, up to 8)
+    recent_history = [bs_to_side(x) for x in seq[:8]]
+
+    return {
+        "current_pattern": bs_to_side(current),
+        "streak_count": streak_count,
+        "pattern_label": pattern_label,
+        "strength": strength,
+        "dragon_strike": dragon_strike,
+        "recent_history": recent_history,
+        "direction": bs_to_side(current)
+    }
+
+
+# ============================================================
+# SECTION 5: PREDICTION COMBINER
+# ============================================================
+def combine_predictions(alt_result, dragon_result):
+    """
+    Combine both detectors into a single prediction.
+    Priority:
+      1. If alternating pattern is active (strength > 0) → use it
+      2. Else if dragon streak is active (streak >= 2) → follow the streak
+      3. Else → no clear signal
+    """
+    alt_strength = alt_result.get("strength", 0)
+    alt_next = alt_result.get("next_expected")
+
+    dragon_streak = dragon_result.get("streak_count", 0)
+    dragon_dir = dragon_result.get("direction")
+    dragon_strength = dragon_result.get("strength", 0)
+
+    # Priority 1: Alternating pattern
+    if alt_strength > 0 and alt_next:
+        return {
+            "side": alt_next,
+            "confidence": alt_strength,
+            "source": "ALTERNATING_PATTERN",
+            "reason": f"{alt_result['pattern_type']} ({alt_strength}%)"
+        }
+
+    # Priority 2: Dragon / Streak
+    if dragon_streak >= CONFIG["STREAK_THRESHOLD"] and dragon_dir:
+        return {
+            "side": dragon_dir,
+            "confidence": dragon_strength,
+            "source": "DRAGON_STREAK",
+            "reason": f"{dragon_result['pattern_label']} (x{dragon_streak})"
+        }
+
+    # No clear signal
+    return {
+        "side": None,
+        "confidence": 0,
+        "source": "NO_SIGNAL",
+        "reason": "No clear pattern detected"
+    }
+
+
+# ============================================================
+# SECTION 6: NUMBER SELECTOR
 # ============================================================
 def pick_numbers(side, history_nums):
+    if side is None:
+        return None, None
     pool = BIG_POOL if side == "BIG" else SMALL_POOL
     used = history_nums[:6]
     fresh = [n for n in pool if n not in used]
@@ -491,7 +247,7 @@ def pick_numbers(side, history_nums):
 
 
 # ============================================================
-# SECTION 8: FETCH HISTORY
+# SECTION 7: FETCH HISTORY
 # ============================================================
 def fetch_history_from_api():
     try:
@@ -511,122 +267,128 @@ def fetch_history_from_api():
 
 
 # ============================================================
-# SECTION 9: MAIN PREDICTOR CLASS
+# SECTION 8: MAIN PREDICTOR CLASS
 # ============================================================
 class PredictionEngine:
     def __init__(self):
-        self.anti_loss = AntiLoss()
         self.history = []
-        self.stats = {"wins": 0, "losses": 0, "jackpots": 0, "total": 0}
+        self.stats = {"wins": 0, "losses": 0, "total": 0}
         self.last_period = None
-        self.last_pred = None
+        self.last_pred_side = None
         self.last_nums = None
-        self.last_side = None
+        self.prediction_log = []       # for dragon detector WIN/LOSS
+        self.pattern_history = []      # for alternating detector log
 
+    # --------------------------------------------------------
+    # VALIDATE PREVIOUS PREDICTION
+    # --------------------------------------------------------
     def validate(self, latest):
         if not self.last_period or self.last_period == latest["issue"]:
             return
-        if self.last_pred is None:
+        if self.last_pred_side is None:
             return
 
-        actual_num = latest["number"]
         actual_side = latest["size"]
-        jackpot = self.last_nums and actual_num in self.last_nums
-        side_win = actual_side == self.last_side
-        final_win = side_win or jackpot
+        win = (actual_side == self.last_pred_side)
 
         self.stats["total"] += 1
-        if final_win:
+        if win:
             self.stats["wins"] += 1
-            if jackpot:
-                self.stats["jackpots"] += 1
         else:
             self.stats["losses"] += 1
 
-        self.anti_loss.settle(self.last_side, actual_num)
+        # Prediction log (STEP 7 of dragon detector)
+        self.prediction_log.insert(0, {
+            "period": self.last_period[-6:],
+            "predicted_side": self.last_pred_side,
+            "actual_side": actual_side,
+            "result": "WIN" if win else "LOSS"
+        })
+        self.prediction_log = self.prediction_log[:20]
 
+        # Main history
         self.history.insert(0, {
             "period": self.last_period[-6:],
-            "pred_side": self.last_side,
+            "pred_side": self.last_pred_side,
             "pred_nums": self.last_nums,
-            "actual": actual_num,
+            "actual": latest["number"],
             "actual_side": actual_side,
-            "result": "JACKPOT" if jackpot else ("WIN" if side_win else "LOSS"),
-            "confidence": self.last_pred.get("confidence", 0)
+            "result": "WIN" if win else "LOSS"
         })
         self.history = self.history[:50]
 
+    # --------------------------------------------------------
+    # MAIN PREDICT
+    # --------------------------------------------------------
     def predict(self, list_data):
         latest = list_data[0]
         self.validate(latest)
 
         nums = [x["number"] for x in list_data[:50]]
-        seq = [to_bs(n) for n in nums]
-        last_num = nums[0]
+        seq = [to_bs(n) for n in nums]   # most recent first
         next_period = str(int(latest["issue"]) + 1)
 
-        ens = ensemble_vote(seq, last_num, next_period)
-        prot = self.anti_loss.process(ens["side"], ens["confidence"], last_num)
+        # ----- Run both detectors -----
+        alt_result = detect_alternating(seq)
+        dragon_result = detect_dragon_streak(seq)
 
-        if prot.get("skip"):
+        # ----- Combine -----
+        combined = combine_predictions(alt_result, dragon_result)
+
+        # ----- Log pattern history (alternating) -----
+        if alt_result["is_alternating"]:
+            self.pattern_history.insert(0, {
+                "time": time.strftime("%H:%M:%S"),
+                "type": alt_result["pattern_type"],
+                "next": alt_result["next_expected"],
+                "strength": alt_result["strength"]
+            })
+            self.pattern_history = self.pattern_history[:10]
+
+        # ----- No signal → skip -----
+        if combined["side"] is None:
             return {
                 "period": next_period,
                 "skip": True,
-                "reason": prot["reason"],
-                "ensemble": ens,
+                "reason": combined["reason"],
+                "alternating": alt_result,
+                "dragon": dragon_result,
                 "stats": dict(self.stats)
             }
 
-        final_side = prot["side"]
+        final_side = combined["side"]
         n1, n2 = pick_numbers(final_side, nums)
-        if prot.get("number") is not None:
-            n1 = prot["number"]
-            others = [x for x in (BIG_POOL if final_side == "BIG" else SMALL_POOL) if x != n1]
-            n2 = random.choice(others) if others else n1
 
-        if final_side == "BIG" and n1 < 5:
-            n1 = 7
-        if final_side == "SMALL" and n1 >= 5:
-            n1 = 2
-
+        # Save state
         self.last_period = latest["issue"]
-        self.last_side = final_side
+        self.last_pred_side = final_side
         self.last_nums = [n1, n2]
-        self.last_pred = {
-            "side": final_side,
-            "confidence": prot["confidence"],
-            "reason": prot["reason"]
-        }
 
         return {
             "period": next_period,
             "side": final_side,
             "numbers": [n1, n2],
-            "confidence": prot["confidence"],
-            "adjusted": prot.get("adjusted", False),
-            "reason": prot.get("reason", "NORMAL"),
-            "bet_size": prot.get("bet_size", 1),
-            "ensemble_votes": ens["votes"],
-            "big_score": ens.get("big_score", 0),
-            "small_score": ens.get("small_score", 0),
-            "anti_loss": {
-                "consecutive_loss": self.anti_loss.consecutive_loss,
-                "emergency": self.anti_loss.emergency,
-                "inverse": self.anti_loss.inverse
-            },
+            "confidence": combined["confidence"],
+            "source": combined["source"],
+            "reason": combined["reason"],
+            "alternating": alt_result,
+            "dragon": dragon_result,
             "stats": dict(self.stats),
+            "prediction_log": self.prediction_log[:5],
+            "pattern_history": self.pattern_history[:5],
             "history": self.history[:10]
         }
 
+    # --------------------------------------------------------
     def run_once(self):
         data = fetch_history_from_api()
-        if not data or len(data) < 5:
+        if not data or len(data) < 4:
             return None
         return self.predict(data)
 
 
 # ============================================================
-# SECTION 10: PUBLIC WRAPPER for FastAPI
+# SECTION 9: PUBLIC WRAPPER for FastAPI
 # ============================================================
 _shared_engine = None
 
@@ -645,7 +407,7 @@ def sddgamer263_predict(current_number: int, period: str) -> dict:
     engine = _get_engine()
     data = fetch_history_from_api()
 
-    if data and len(data) >= 5:
+    if data and len(data) >= 4:
         result = engine.predict(data)
         if result and not result.get("skip"):
             return {
@@ -653,43 +415,43 @@ def sddgamer263_predict(current_number: int, period: str) -> dict:
                 "prediction": result["numbers"][0],
                 "numbers": result["numbers"],
                 "confidence": result["confidence"],
+                "source": result["source"],
                 "steps": [
-                    f"Ensemble: B={result['big_score']} S={result['small_score']}",
+                    f"Source: {result['source']}",
                     f"Reason: {result['reason']}",
-                    f"Votes: {len(result['ensemble_votes'])} engines",
-                    f"Bet: {result['bet_size']}x"
+                    f"Alternating: {result['alternating']['pattern_type']} ({result['alternating']['strength']}%)",
+                    f"Dragon: {result['dragon']['pattern_label']} (x{result['dragon']['streak_count']})"
                 ]
             }
         if result and result.get("skip"):
-            ens = result.get("ensemble", {})
-            side = ens.get("side", "BIG")
             return {
-                "bigSmall": side,
-                "prediction": random.choice(BIG_POOL if side == "BIG" else SMALL_POOL),
-                "numbers": [random.choice(BIG_POOL if side == "BIG" else SMALL_POOL),
-                            random.choice(BIG_POOL if side == "BIG" else SMALL_POOL)],
-                "confidence": ens.get("confidence", 72),
-                "steps": [f"Skipped: {result['reason']} — fallback"]
+                "bigSmall": None,
+                "prediction": None,
+                "numbers": [],
+                "confidence": 0,
+                "steps": [f"Skipped: {result['reason']}"]
             }
 
-    renox = engine_renox_hyper(current_number, period)
+    # Fallback: use current_number directly
+    side = get_size(current_number)
+    pool = BIG_POOL if side == "BIG" else SMALL_POOL
     return {
-        "bigSmall": renox["side"],
-        "prediction": renox["number"],
-        "numbers": [renox["number"]],
-        "confidence": renox["confidence"],
-        "steps": [f"RENOX fallback: {renox['pattern']}"]
+        "bigSmall": side,
+        "prediction": random.choice(pool),
+        "numbers": [random.choice(pool), random.choice(pool)],
+        "confidence": 50,
+        "steps": ["Fallback: no API data"]
     }
 
 
 # ============================================================
-# SECTION 11: ENTRY POINT
+# SECTION 10: ENTRY POINT
 # ============================================================
 if __name__ == "__main__":
     engine = PredictionEngine()
     print("=" * 60)
-    print("  ULTIMATE WINGO PREDICTION ENGINE v11.0")
-    print("  14 Engines Combined — All Patterns Working")
+    print("  WINGO PREDICTION ENGINE v12.0 — NEW LOGIC")
+    print("  Alternating Pattern + Dragon Streak")
     print("=" * 60)
     while True:
         try:
@@ -697,19 +459,32 @@ if __name__ == "__main__":
             if r:
                 if r.get("skip"):
                     print(f"\n⏸️  SKIP: {r['reason']}")
+                    print(f"   Alternating: {r['alternating']['pattern_type']} ({r['alternating']['strength']}%)")
+                    print(f"   Dragon: {r['dragon']['pattern_label']} (x{r['dragon']['streak_count']})")
                 else:
                     print(f"\n{'─' * 60}")
                     print(f"  PERIOD: {r['period']}")
                     print(f"  🎯 SIGNAL: {r['side']}")
                     print(f"  🔢 NUMBERS: {r['numbers'][0]} , {r['numbers'][1]}")
                     print(f"  📊 CONFIDENCE: {r['confidence']}%")
-                    print(f"  🧠 REASON: {r['reason']}")
-                    print(f"  🗳️  VOTES:")
-                    for v in r["ensemble_votes"][:6]:
-                        print(f"      • {v['engine']:22s} → {v['side']:5s} ({v['confidence']}%)")
+                    print(f"  🧠 SOURCE: {r['source']}")
+                    print(f"  📝 REASON: {r['reason']}")
+                    print(f"  ── Alternating Detector ──")
+                    print(f"     Type: {r['alternating']['pattern_type']}")
+                    print(f"     Strength: {r['alternating']['strength']}%")
+                    print(f"     Next: {r['alternating']['next_expected']}")
+                    print(f"  ── Dragon Streak Detector ──")
+                    print(f"     Pattern: {r['dragon']['pattern_label']}")
+                    print(f"     Streak: x{r['dragon']['streak_count']}")
+                    print(f"     Strength: {r['dragon']['strength']}%")
+                    print(f"     Dragon: {'YES' if r['dragon']['dragon_strike'] else 'NO'}")
                     s = r["stats"]
                     wr = round(s["wins"] / s["total"] * 100, 1) if s["total"] else 0
-                    print(f"  📈 Stats → W:{s['wins']} L:{s['losses']} J:{s['jackpots']} | WR:{wr}%")
+                    print(f"  📈 Stats → W:{s['wins']} L:{s['losses']} | WR:{wr}%")
+                    if r.get("prediction_log"):
+                        print(f"  📋 Recent Predictions:")
+                        for p in r["prediction_log"][:3]:
+                            print(f"     [{p['period']}] {p['predicted_side']} → {p['actual_side']} | {p['result']}")
         except KeyboardInterrupt:
             print("\n[!] Stopped.")
             break
