@@ -1,180 +1,238 @@
-"""
-============================================================
-  WINGO PREDICTION ENGINE v16.0
-  GEMINI AI PREDICTION ENGINE (STABLE)
-  
-  Fixes:
-  - 503 error handling with multiple model fallback
-  - JSON parse error fix (higher token limit + repair)
-  - Period Lock: ek period pe sirf EK BAAR Gemini call
-  - Exponential backoff retry
-============================================================
-"""
+#!/usr/bin/env python3
+# ═══════════════════════════════════════════════════════════════
+#  NAVEEN AI TOOL 2026 — Python Port
+#  Prediction logic: 100% same as JS (routes-Dl9jpyPE.js)
+#  Old logic: FULLY REMOVED
+# ═══════════════════════════════════════════════════════════════
 
-import json
 import time
-import re
-import urllib.request
-import urllib.error
+import requests
+import os
 
-# ============================================================
-# SECTION 1: CONFIGURATION
-# =====
-    history_str = "\n".join([
-        f"{h['issue']} -> {h['number']} ({h['size']})"
-        for h in history_data[:30]
-    ])
+# ─── Colors ───
+RED     = "\033[91m"
+GREEN   = "\033[92m"
+YELLOW  = "\033[93m"
+CYAN    = "\033[96m"
+MAGENTA = "\033[95m"
+WHITE   = "\033[97m"
+RESET   = "\033[0m"
+BOLD    = "\033[1m"
 
-    prompt = f"""Analyze WinGo 1M lottery history and predict next result.
+# ─── Banner font ───
+try:
+    from cfonts import render
+except ImportError:
+    os.system('pip install python-cfonts -q')
+    from cfonts import render
 
-HISTORY (recent first):
-{history_str}
+# ─── API ───
+API_URL = "https://sky-predictor-1012593186417.asia-southeast1.run.app/api/wingo-history-1M-100"
 
-Respond ONLY with valid JSON in this exact format:
-{{"prediction_number": 7, "big_small": "BIG", "confidence": 75, "reason": "short reason"}}
+HEADERS = {
+    "User-Agent": "Mozilla/5.0",
+    "Referer": "https://hgnice.biz"
+}
 
-Rules:
-- prediction_number: integer 0 to 9
-- big_small: "BIG" if number >= 5, else "SMALL"
-- confidence: integer 0 to 100
-- reason: max 10 words
-- NO markdown, NO extra text, ONLY the JSON object"""
 
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "temperature": 0.8,
-            "topK": 40,
-            "topP": 0.95,
-            "maxOutputTokens": CONFIG["MAX_OUTPUT_TOKENS"],
-        },
-        "        if actual is None:
-            return None  # result abhi nahi aaya
+# ═══════════════════════════════════════════════════════════════
+#  CORE PREDICTION LOGIC — JS ka exact port
+# ═══════════════════════════════════════════════════════════════
 
-        actual_num = actual["number"]
-        actual_side = actual["size"]
-        pred_num = self.pending_prediction["number"]
-        pred_side = self.pending_prediction["side"]
+def fnv1a_hash(s: str) -> int:
+    """
+    JS re() function ka exact port.
+    FNV-1a 32-bit hash — deterministic randomness ke liye.
+    """
+    t = 2166136261
+    for ch in s:
+        t ^= ord(ch)
+        t = (t * 16777619) & 0xFFFFFFFF   # Math.imul 32-bit wrap
+    return abs(t)
 
-        is_win = (pred_side == actual_side)
-        is_jackpot = (pred_num == actual_num)
 
-        self.stats["total"] += 1
-        if is_win:
-            self.stats["wins"] += 1
-        else:
-            self.stats["losses"] += 1
+def next_issue(issue: str) -> str:
+    """
+    JS ne() function ka exact port.
+    Period number ko +1 karta hai, leading zeros preserve karte hue.
+    """
+    digits = ''.join(c for c in issue if c.isdigit())
+    if not digits:
+        return issue
+    nxt = str(int(digits) + 1).zfill(len(digits))
+    return issue.replace(digits, nxt)
 
-        if is_jackpot:
-            status = "JACKPOT"
-        elif is_win:
-            status = "WIN"
-        else:
-            status = "LOSS"
 
-        log_entry = {
-            "period": target_period[-6:],
-            "predicted_side": pred_side,
-            "predicted_number": pred_num,
-            "actual_side": actual_side,
-            "actual_number": actual_num,
-            "
-def sddgamer263_predict(current_number: int, period: str) -> dict:
-    engine = _get_engine()
-    data = fetch_history_from_api()
+def get_big_small(num: int) -> str:
+    """Number >= 5 → BIG, warna SMALL."""
+    return "BIG" if num >= 5 else "SMALL"
 
-    if data and len(data) >= 4:
-        result = engine.predict(data)
-        if result:
-            return {
-                "bigSmall": result["side"],
-                "prediction": result["number"],
-                "numbers": [result["number"]],
-                "confidence": result["confidence"],
-                "reason": result.get("reason", ""),
-                "model": result.get("model", ""),
-                "source": "GEMINI_AI",
-                "period": result["period"],
-                "cached": result.get("cached", False),
-                "stats": result.get("stats", {}),
-                "recent_log": result.get("prediction_log", [])[:5],
-                "steps": [
-                    f"Period: {result['period']}",
-                    f"Predicted: {result['side']} ({result['number']})",
-                    f"Confidence: {result['confidence']}%",
-                    f"Model: {result.get('model', '')}",
-                    f"Reason: {result.get('reason', '')}",
-                ]
-            }
 
-    fallback_num = (current_number + 5) % 10
+def predict(results, last_issue: str):
+    """
+    JS te() function ka exact port.
+
+    Input:
+        results    = list of dicts [{'period':..., 'number':int, 'size':...}, ...]
+                     (latest pehle, matlab results[0] = sabse naya)
+        last_issue = latest period number (string)
+
+    Output:
+        {
+          'issue': next period number,
+          'size': 'BIG' / 'SMALL',
+          'confidence': 68..97,
+          'score': float
+        }
+    """
+    if not results:
+        return None
+
+    # ── Step 1: Next period number ──
+    n = next_issue(last_issue)
+
+    # ── Step 2: Last 10 results lo ──
+    r = results[:10]
+    if not r:
+        return None
+
+    # ── Step 3: Weighted trend score ──
+    i = 0.0
+    for idx, item in enumerate(r):
+        weight = 1.0 / (idx + 1)                              # 1, 1/2, 1/3 ...
+        size_sign = 1 if item['size'] == 'BIG' else -1
+        i += size_sign * weight                               # BIG=+, SMALL=-
+        i += (item['number'] - 4.5) / 4.5 * weight * 0.6      # number bias
+
+    # ── Step 4: Streak reversal detection ──
+    a = 1
+    while a < len(r) and r[a]['size'] == r[0]['size']:
+        a += 1
+    if a >= 3:
+        # 3+ same → reverse predict
+        i += -1.4 if r[0]['size'] == 'BIG' else 1.4
+
+    # ── Step 5: Deterministic hash noise ──
+    o = fnv1a_hash(n) % 1000
+    i += (o / 1000.0 - 0.5) * 0.5
+
+    # ── Step 6: Final prediction ──
+    size = 'BIG' if i < 0 else 'SMALL'
+    confidence = min(97, 68 + round(abs(i) * 9))
+
     return {
-        "bigSmall": get_size(fallback_num),
-        "prediction": fallback_num,
-        "numbers": [fallback_num],
-        "confidence": 35,
-        "reason": "Fallback (no API data)",
-        "source": "FALLBACK",
-        "steps": ["Fallback: no API data"],
+        'issue': n,
+        'size': size,
+        'confidence': confidence,
+        'score': round(i, 4)
     }
 
 
-# ============================================================
-# SECTION 8: ENTRY POINT
-# ============================================================
-if __name__ == "__main__":
-    engine = PredictionEngine()
-    print("=" * 60)
-    print("  WINGO PREDICTION ENGINE v16.0")
-    print("  GEMINI AI (STABLE)")
-    print("=" * 60)
-    print("  - Multi-model fallback (503 fix)")
-    print("  - JSON repair (parse error fix)")
-    print("  - Period Lock (duplicate fix)")
-    print("=" * 60)
+# ═══════════════════════════════════════════════════════════════
+#  API FETCH
+# ═══════════════════════════════════════════════════════════════
 
-    last_shown_period = None
+def fetch_data():
+    """Yaar Win server se last 100 WinGo results laata hai."""
+    try:
+        res = requests.get(API_URL, headers=HEADERS, timeout=10)
+        data = res.json()
+
+        if 'data' in data and 'list' in data['data']:
+            out = []
+            for item in data['data']['list']:
+                num = int(item['number'])
+                out.append({
+                    'period': str(item['issueNumber']),
+                    'number': num,
+                    'size': get_big_small(num)
+                })
+            return out
+    except Exception as e:
+        print(f"{RED}Fetch error: {e}{RESET}")
+        return []
+    return []
+
+
+# ═══════════════════════════════════════════════════════════════
+#  DISPLAY
+# ═══════════════════════════════════════════════════════════════
+
+def banner():
+    os.system('cls' if os.name == 'nt' else 'clear')
+    output = render('SDD', colors=['yellow', 'green'], align='center', font='block')
+    print(output)
+    print(f"{CYAN}{'═' * 40}{RESET}")
+    print(f"{YELLOW}{BOLD}🔥 1 MINUTE AUTO MODE ACTIVE 🔥{RESET}")
+    print(f"{CYAN}{'═' * 40}{RESET}\n")
+
+
+def print_prediction(period, pred, confidence, score):
+    short_period = period[-3:]
+    print(f"\n{MAGENTA}{'━' * 40}{RESET}")
+    print(f"{CYAN}⏱ PERIOD     ➜ {WHITE}{short_period}{RESET}")
+    color = RED if pred == "BIG" else GREEN
+    print(f"{CYAN}🎯 PREDICTION ➜ {color}{BOLD}{pred}{RESET}")
+    print(f"{CYAN}📈 CONFIDENCE ➜ {WHITE}{confidence}%{RESET}")
+    print(f"{CYAN}🧮 SCORE      ➜ {WHITE}{score}{RESET}")
+    print(f"{CYAN}📊 RESULT     ➜ {RESET}", end="", flush=True)
+
+
+def print_result(actual_num, pred_type):
+    actual_type = get_big_small(actual_num)
+    if actual_type == pred_type:
+        print(f"{GREEN}{BOLD}WIN ✅ [{actual_num} {actual_type}]{RESET}")
+    else:
+        print(f"{RED}{BOLD}LOSS ❌ [{actual_num} {actual_type}]{RESET}")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  MAIN LOOP
+# ═══════════════════════════════════════════════════════════════
+
+def run():
+    banner()
+
+    last_period = None
+    active_prediction = None
+    predicted_period = None
 
     while True:
-        try:
-            r = engine.run_once()
-            if r:
-                # Sirf tab print karo jab naya period ho ya result complete hua ho
-                show = (r["period"] != last_shown_period) or r.get("just_completed")
+        data = fetch_data()
 
-                if show:
-                    print(f"\n{'─' * 60}")
-                    print(f"  PERIOD: {r['period']}")
-                    print(f"  🎯 PREDICTION: {r['side']}")
-                    print(f"  🔢 NUMBER: {r['number']}")
-                    print(f"  📊 CONFIDENCE: {r['confidence']}%")
-                    print(f"  🤖 MODEL: {r.get('model', 'N/A')}")
-                    print(f"  💡 REASON: {r['reason']}")
-                    print(f"  📈 Stats → W:{r['stats']['wins']} L:{r['stats']['losses']} "
-                          f"Total:{r['stats']['total']}")
-                    if r.get("cached"):
-                        print(f"  🔒 (locked — same period, no new API call)")
+        if not data or len(data) < 3:
+            time.sleep(2)
+            continue
 
-                    if r.get("just_completed"):
-                        jc = r["just_completed"]
-                        print(f"  ✅ RESULT [{jc['period'][-6:]}]: "
-                              f"Pred {jc['predicted_side']}({jc['predicted_number']}) → "
-                              f"Actual {jc['actual_side']}({jc['actual_number']}) | "
-                              f"{jc['result_status']}")
+        latest = data[0]
+        current_period = latest['period']
+        current_number = latest['number']
 
-                    if r.get("prediction_log"):
-                        print(f"  📋 Recent:")
-                        for p in r["prediction_log"][:3]:
-                            print(f"     [{p['period']}] "
-                                  f"{p['predicted_side']}({p['predicted_number']}) → "
-                                  f"{p['actual_side']}({p['actual_number']}) | "
-                                  f"{p['result']}")
+        if current_period != last_period:
+            last_period = current_period
 
-                    last_shown_period = r["period"]
+            # Pichhli prediction ka result dikhao
+            if active_prediction and predicted_period:
+                print_result(current_number, active_prediction)
 
-        except KeyboardInterrupt:
-            print("\n[!] Stopped.")
-            break
-        except Exception as e:
-            print(f"[!] Error: {e}")
-        time.sleep(5)
+            # Naya prediction
+            pred = predict(data, current_period)
+            if pred:
+                predicted_period = pred['issue']
+                active_prediction = pred['size']
+                print_prediction(
+                    pred['issue'],
+                    pred['size'],
+                    pred['confidence'],
+                    pred['score']
+                )
+
+        time.sleep(3)
+
+
+# ═══════════════════════════════════════════════════════════════
+#  START
+# ═══════════════════════════════════════════════════════════════
+
+if __name__ == "__main__":
+    run()
