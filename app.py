@@ -1,11 +1,11 @@
 """
-FastAPI Prediction Server — Wingo 1 Min Mode (v4.1 FIXED)
+FastAPI Prediction Server — Wingo 1 Min Mode (v5.0 FINAL)
 ----------------------------------------------------------
 ✅ Firebase Integration (Key validation, Server status, Withdrawal)
 ✅ Admin Panel Control
 ✅ User Panel Auto Login/Logout
-✅ SDDGAMER263 Prediction Algorithm
-✅ Same period → Same prediction (cached)
+✅ NAVEEN AI Prediction Engine (Har period naya prediction)
+✅ Same period → Same prediction (cached 55 sec)
 """
 
 from fastapi import FastAPI, Query, HTTPException, Request
@@ -31,7 +31,7 @@ from firebase_config import (
     init_firebase,
 )
 
-# ✅ FIXED IMPORT — ye add kiya
+# ✅ NAVEEN AI PREDICTION ENGINE
 from prediction_engine import sddgamer263_predict
 
 # Firebase init on startup
@@ -39,11 +39,11 @@ init_firebase()
 
 app = FastAPI(
     title="Wingo Prediction API",
-    description="Wingo 1M prediction server with Firebase auth + new algorithm",
-    version="4.1.0"
+    description="Wingo 1M prediction server with Firebase auth + NAVEEN AI",
+    version="5.0.0"
 )
 
-# CORS — credentials False kyunki origin "*" hai
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -72,6 +72,7 @@ IST = timezone(timedelta(hours=5, minutes=30))
 # ============================================================
 PREDICTION_CACHE: Dict[str, dict] = {}
 MAX_CACHE_SIZE = 500
+CACHE_TTL_SEC = 55
 
 
 def get_cached_prediction(period: str):
@@ -137,20 +138,8 @@ def fetch_live_period():
     return {"period": get_current_period(), "remaining_seconds": get_remaining_seconds(), "source": "local"}
 
 
-def get_last_result_number():
-    """Last result ka number nikalo (0-9)."""
-    data = fetch_history()
-    lst = data.get("data", {}).get("list", [])
-    if lst and lst[0].get("number") is not None:
-        try:
-            return int(lst[0]["number"]) % 10
-        except (ValueError, TypeError):
-            pass
-    return random.randint(0, 9)
-
-
 # ============================================================
-# 🎯 NEW PREDICTION (SDDGAMER263) — CACHED
+# 🎯 PREDICTION — CACHED + NAYA PERIOD → NAYA PREDICTION
 # ============================================================
 def generate_prediction(period: Optional[str] = None,
                         game_id: str = "wingo_1min",
@@ -159,16 +148,30 @@ def generate_prediction(period: Optional[str] = None,
         live = fetch_live_period()
         period = live["period"]
 
+    # ✅ Cache check — sirf 55 sec valid
     if use_cache:
         cached = get_cached_prediction(period)
         if cached is not None:
-            cached["timestamp"] = int(time.time() * 1000)
-            cached["fromCache"] = True
-            return cached
+            age_sec = (time.time() * 1000 - cached.get("timestamp", 0)) / 1000
+            if age_sec < CACHE_TTL_SEC:
+                cached["timestamp"] = int(time.time() * 1000)
+                cached["fromCache"] = True
+                return cached
+            else:
+                PREDICTION_CACHE.pop(period, None)
 
-    last_number = get_last_result_number()
+    # Live history se last number nikalo
+    history_data = fetch_history()
+    history_list = history_data.get("data", {}).get("list", [])
 
-    # ✅ NEW PREDICTION ENGINE
+    last_number = 0
+    if history_list:
+        try:
+            last_number = int(history_list[0].get("number", 0)) % 10
+        except (ValueError, TypeError):
+            last_number = 0
+
+    # ✅ NAVEEN AI ENGINE CALL
     result = sddgamer263_predict(current_number=last_number, period=period)
 
     prediction = {
@@ -179,8 +182,9 @@ def generate_prediction(period: Optional[str] = None,
         "numberResult": result["prediction"],
         "numbers": result.get("numbers", [result["prediction"]]),
         "confidence": result["confidence"],
-        "patternName": "SDDGAMER263 QUANTUM MATRIX v11",
+        "patternName": "NAVEEN AI v2026",
         "steps": result.get("steps", []),
+        "source": result.get("source", "naveen-ai"),
         "inputNumber": last_number,
         "timestamp": int(time.time() * 1000),
         "fromCache": False
@@ -251,8 +255,8 @@ def root():
     return {
         "status": "online",
         "mode": "wingo-1m",
-        "version": "4.1.0",
-        "engine": "ULTIMATE v11.0",
+        "version": "5.0.0",
+        "engine": "NAVEEN AI v2026",
         "cachedPeriods": len(PREDICTION_CACHE)
     }
 
@@ -265,6 +269,29 @@ def firebase_config():
 @app.get("/server-status")
 def server_status():
     return get_server_status()
+
+
+# ============================================================
+# 🌐 PUBLIC PREDICTION (No Key Required)
+# ============================================================
+@app.get("/public/predict")
+def public_predict():
+    """Bina key ke prediction — public access."""
+    check_server_online_or_raise()
+    pred = generate_prediction()
+    images = get_prediction_images(pred)
+    return {
+        "prediction": pred["bigSmallResult"],
+        "period": pred["period"],
+        "number": pred["numberResult"],
+        "numbers": pred.get("numbers", [pred["numberResult"]]),
+        "confidence": pred["confidence"],
+        "patternName": pred["patternName"],
+        "bigSmallImage": images["bigSmallImage"],
+        "numberImage": images["numberImage"],
+        "timestamp": pred["timestamp"],
+        "fromCache": pred.get("fromCache", False)
+    }
 
 
 # ============================================================
@@ -362,6 +389,7 @@ def predict(
         "confidence": pred["confidence"],
         "mode": pred["mode"],
         "patternName": pred["patternName"],
+        "source": pred.get("source", "naveen-ai"),
         "bigSmallImage": images["bigSmallImage"],
         "numberImage": images["numberImage"],
         "timestamp": pred["timestamp"],
@@ -390,6 +418,7 @@ def predict_full(key: str = Query(...)):
             "confidence": pred["confidence"],
             "period": pred["period"],
             "patternName": pred["patternName"],
+            "source": pred.get("source", "naveen-ai"),
             "bigSmallImage": images["bigSmallImage"],
             "numberImage": images["numberImage"],
             "fromCache": pred.get("fromCache", False),
@@ -705,4 +734,5 @@ if os.path.isdir("static"):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("app:app", host="0.0.0.0", port=port, reload=False)
