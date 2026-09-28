@@ -1,22 +1,21 @@
 """
 Prediction Engine — NAVEEN AI TOOL 2026
 ----------------------------------------
-SAAD VIP HTML Logic (Master Predictive Engine 3.0) 100% ported to Python.
-Old prediction logic 100% REMOVED.
-Final output: BIG/SMALL + 2 Numbers (SAME colour side, NO opposite).
-Colour used internally only — NOT shown to user.
+HTML Logic (NG MADMAX) 100% ported to Python.
+Purana prediction logic 100% REMOVED.
+BIG/SMALL + OPPOSITE NUMBERS prediction included.
 """
 
 import requests
 import time
 import random
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 
 # ============================================================
 # 🔑 API CONFIG
 # ============================================================
-API_URL = "https://sky-predictor-1012593186417.asia-southeast1.run.app/api/wingo-history-1m-1000"
+API_URL = "https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0",
@@ -31,48 +30,20 @@ _CACHE_TTL = 50
 
 
 # ============================================================
-# 🎨 COLOUR POOLS (HTML exact: odd = GREEN, even = RED)
+# 🎯 HTML LOGIC — 100% EXACT PORT (NG MADMAX)
 # ============================================================
-# BIG = 5..9 | SMALL = 0..4
-# RED = even  | GREEN = odd
 
-# SAME-SIDE pools (no opposite) — both numbers come from here
-
-# BIG + RED   -> even numbers in 5..9  -> [6, 8]
-BIG_RED_POOL = [6, 8]
-
-# BIG + GREEN -> odd numbers in 5..9   -> [5, 7, 9]
-BIG_GREEN_POOL = [5, 7, 9]
-
-# SMALL + RED -> even numbers in 0..4  -> [0, 2, 4]
-SMALL_RED_POOL = [0, 2, 4]
-
-# SMALL + GREEN -> odd numbers in 0..4 -> [1, 3]
-SMALL_GREEN_POOL = [1, 3]
+B_POOL = [5, 6, 7, 8, 9]   # BIG numbers
+S_POOL = [0, 1, 2, 3, 4]   # SMALL numbers
 
 
 def get_big_small(num: int) -> str:
+    """HTML: parseInt(x.number) >= 5 ? 'BIG' : 'SMALL'"""
     return "BIG" if num >= 5 else "SMALL"
 
 
-def get_colour(num: int) -> str:
-    return "GREEN" if num % 2 != 0 else "RED"
-
-
-def numbers_for(big_small: str, colour: str) -> List[int]:
-    """Return pool matching BOTH big/small AND colour (same side only)."""
-    if big_small == "BIG" and colour == "RED":
-        return BIG_RED_POOL
-    if big_small == "BIG" and colour == "GREEN":
-        return BIG_GREEN_POOL
-    if big_small == "SMALL" and colour == "RED":
-        return SMALL_RED_POOL
-    if big_small == "SMALL" and colour == "GREEN":
-        return SMALL_GREEN_POOL
-    return SMALL_GREEN_POOL
-
-
 def next_issue(issue: str) -> str:
+    """HTML: (BigInt(latest.issueNumber) + 1n).toString()"""
     try:
         return str(int(issue) + 1)
     except:
@@ -80,214 +51,74 @@ def next_issue(issue: str) -> str:
 
 
 def fetch_data() -> List[dict]:
-    """Fetch live history from SAAD VIP API (1000 memory records)."""
+    """
+    HTML fetch:
+    https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json
+    Returns latest history list (newest first).
+    """
     try:
         res = requests.get(API_URL, headers=HEADERS, timeout=10)
         data = res.json()
-
-        raw_list = None
-        if isinstance(data, dict):
-            if 'data' in data and isinstance(data['data'], dict) and 'list' in data['data']:
-                raw_list = data['data']['list']
-            elif 'list' in data:
-                raw_list = data['list']
-
-        if not raw_list:
-            return []
-
-        out = []
-        for item in raw_list:
-            raw_num = item.get('number', item.get('result', 0))
-            try:
-                num = int(raw_num)
-            except:
-                num = 0
-
-            period = str(item.get('period', item.get('issueNumber', '')))
-            if not period:
-                continue
-
-            out.append({
-                'period': period,
-                'number': num,
-                'size': get_big_small(num),
-                'colour': get_colour(num)
-            })
-        return out
-
+        if 'data' in data and 'list' in data['data']:
+            out = []
+            for item in data['data']['list']:
+                num = int(item['number'])
+                out.append({
+                    'period': str(item['issueNumber']),
+                    'number': num,
+                    'size': get_big_small(num)
+                })
+            return out
     except Exception as e:
         print(f"Fetch error: {e}")
         return []
+    return []
 
 
-# ============================================================
-# 🎯 SAAD VIP HTML LOGIC — 100% EXACT PORT
-# ============================================================
+def html_predict(history: List[dict]) -> dict:
+    """
+    HTML runLogic() ka 100% EXACT port:
 
-def execute_saad_vip_deterministic_pipeline(
-    history: List[dict],
-    target_period: str
-) -> Optional[dict]:
-    """HTML: executeSaadVipDeterministicPipeline(rawList, targetPeriod)"""
-    if not history or len(history) < 23:
-        return {
-            'colour': "GREEN",
-            'primary': 9,
-            'override': 3,
-            'confidence': "100%",
-            'reason': "Initializing 1,000 Memory Backtest"
-        }
+    const last5 = json.data.list.slice(0, 5).map(
+        x => parseInt(x.number) >= 5 ? "BIG" : "SMALL"
+    );
+    const nextPred = last5.filter(x => x === "BIG").length > 2
+                     ? "BIG" : "SMALL";
 
-    # Step 1: Last 23 numbers summation
-    last23 = [r['number'] for r in history[:23]]
-    sum23 = sum(last23)
+    const pool = nextPred === "BIG" ? S_POOL : B_POOL;
+    currentOpposites = pool.sort(() => 0.5 - Math.random()).slice(0, 2);
+    """
+    if not history:
+        return None
 
-    # Step 2: Period trailing digit
-    period_str = str(target_period)
-    try:
-        last_period_digit = int(period_str[-1])
-    except:
-        last_period_digit = 0
+    # last 5 results → BIG/SMALL mapping
+    last5 = [item['size'] for item in history[:5]]
 
-    # Step 3: Division & modulo matrix
-    computed_val = ((sum23 + last_period_digit) // 2) % 10
-    secondary_val = sum23 % 7
+    # nextPred = BIG if BIG count > 2 else SMALL
+    big_count = sum(1 for x in last5 if x == "BIG")
+    next_pred = "BIG" if big_count > 2 else "SMALL"
 
-    # Steps 5-23: Conditional rule mapping (exact HTML port)
-    target_colour = "GREEN"
-    primary_num = computed_val
-    override_num = secondary_val
-    reason_text = "Step 23: 1,000-Draw Backtest Recursive Matrix"
+    # Opposite pool logic (HTML exact)
+    pool = S_POOL if next_pred == "BIG" else B_POOL
+    pool_copy = pool[:]
+    random.shuffle(pool_copy)                 # .sort(() => 0.5 - Math.random())
+    opposites = pool_copy[:2]                 # .slice(0, 2)
 
-    if computed_val in (0, 1):
-        target_colour = "RED"
-        primary_num = computed_val
-        override_num = 1
-        reason_text = "Rule 05: 0/1 Mapping -> RED"
+    latest = history[0]
+    next_period = next_issue(latest['period'])
 
-    elif computed_val in (4, 6) and sum23 % 2 == 0:
-        target_colour = "RED"
-        primary_num = computed_val
-        override_num = 6
-        reason_text = "Rule 06: 4/6 Mapping -> RED"
-
-    elif computed_val in (4, 0):
-        target_colour = "GREEN"
-        primary_num = computed_val
-        override_num = 4
-        reason_text = "Rule 07: 4/0 Mapping -> GREEN"
-
-    elif computed_val in (8, 7) and sum23 % 3 == 0:
-        target_colour = "GREEN"
-        primary_num = 8
-        override_num = 7
-        reason_text = "Rule 08: 8/7 Mapping -> GREEN"
-
-    elif computed_val in (9, 7):
-        target_colour = "RED"
-        primary_num = 9
-        override_num = 7
-        reason_text = "Rule 09: 9/7 Mapping -> RED"
-
-    elif computed_val == 0:
-        target_colour = "RED"
-        primary_num = 0
-        override_num = 5
-        reason_text = "Rule 10: 0 Mapping -> RED"
-
-    elif computed_val == 6:
-        target_colour = "GREEN"
-        primary_num = 2
-        override_num = 6
-        reason_text = "Rule 21: 6 Mapping -> 2 RED / GREEN Override"
-
-    elif computed_val in (4, 9):
-        target_colour = "GREEN"
-        primary_num = 4
-        override_num = 9
-        reason_text = "Rule 12: 4/9 Mapping -> GREEN"
-
-    elif computed_val in (1, 7):
-        target_colour = "RED"
-        primary_num = 1
-        override_num = 7
-        reason_text = "Rule 13: 1/7 Mapping -> RED"
-
-    elif computed_val in (2, 9):
-        target_colour = "GREEN"
-        primary_num = 2
-        override_num = 9
-        reason_text = "Rule 14: 2/9 Mapping -> GREEN"
-
-    elif computed_val in (3, 7):
-        target_colour = "RED"
-        primary_num = 3
-        override_num = 7
-        reason_text = "Rule 15: 3/7 Mapping -> RED"
-
-    elif computed_val == 4:
-        target_colour = "RED"
-        primary_num = 8
-        override_num = 4
-        reason_text = "Rule 20: 4 Mapping -> 8 RED"
-
-    elif computed_val == 9:
-        target_colour = "RED"
-        primary_num = 6
-        override_num = 9
-        reason_text = "Rule 22: 9 Mapping -> 6 RED"
-
-    elif computed_val in (5, 3):
-        target_colour = "GREEN"
-        primary_num = 9
-        override_num = 3
-        reason_text = "Rule 23: 5/3 Mapping -> GREEN 9"
-
-    else:
-        target_colour = "GREEN" if sum23 % 2 == 0 else "RED"
-        primary_num = computed_val
-        override_num = (computed_val + 5) % 10
-        reason_text = "Step 25: 100% Confirmed Result Vector"
+    # Confidence based on BIG count strength (visual only)
+    confidence = 70 + abs(big_count - 2) * 5
+    confidence = min(confidence, 95)
 
     return {
-        'colour': target_colour,
-        'primary': primary_num,
-        'override': override_num,
-        'confidence': "100%",
-        'reason': reason_text
+        'issue': next_period,
+        'size': next_pred,
+        'confidence': confidence,
+        'opposites': opposites,
+        'big_count': big_count,
+        'last5': last5
     }
-
-
-def derive_big_small_from_pipeline(result: dict) -> str:
-    """Derive BIG/SMALL from pipeline primary number."""
-    primary = result['primary']
-    if primary == 0 and result['override'] >= 5:
-        return "BIG"
-    return "BIG" if primary >= 5 else "SMALL"
-
-
-def pick_two_numbers_same_side(big_small: str, colour: str) -> List[int]:
-    """
-    Pick 2 DISTINCT numbers from SAME colour side (no opposite).
-
-    Examples:
-      BIG + GREEN   -> [9, 7, 5] -> pick 2 -> e.g. [9, 7]
-      BIG + RED     -> [8, 6]    -> [8, 6]
-      SMALL + RED   -> [0, 2, 4] -> e.g. [4, 0]
-      SMALL + GREEN -> [1, 3]    -> [1, 3]
-    """
-    pool = numbers_for(big_small, colour)
-
-    if len(pool) >= 2:
-        picked = random.sample(pool, 2)
-        # Sort descending for cleaner display like 9/7 or 8/6
-        picked.sort(reverse=True)
-        return picked
-
-    if len(pool) == 1:
-        return [pool[0], pool[0]]
-
-    return [random.randint(0, 9), random.randint(0, 9)]
 
 
 # ============================================================
@@ -296,11 +127,9 @@ def pick_two_numbers_same_side(big_small: str, colour: str) -> List[int]:
 
 def sddgamer263_predict(current_number: int, period: str) -> dict:
     """
-    Final output:
-      - bigSmall : "BIG" or "SMALL"
-      - numbers  : 2 numbers from SAME colour side (e.g. 9/7 or 8/6)
-      - display  : "9/7" style string
-    Colour used INTERNALLY only — NOT exposed.
+    app.py compatible wrapper.
+    HTML logic 100% ported — BIG/SMALL + Opposite Numbers.
+    Har naye period pe naya prediction dega.
     """
 
     # Cache check
@@ -311,7 +140,7 @@ def sddgamer263_predict(current_number: int, period: str) -> dict:
             "bigSmall": cached["bigSmall"],
             "confidence": cached["confidence"],
             "numbers": cached["numbers"],
-            "display": cached["display"],
+            "opposites": cached["opposites"],
             "steps": cached["steps"],
             "source": "engine-cache"
         }
@@ -320,66 +149,60 @@ def sddgamer263_predict(current_number: int, period: str) -> dict:
     history = fetch_data()
 
     if not history:
+        # Fallback (same HTML pattern — 50/50)
         fallback_size = "BIG" if random.random() > 0.5 else "SMALL"
-        fallback_colour = "GREEN" if random.random() > 0.5 else "RED"
-        fallback_nums = pick_two_numbers_same_side(fallback_size, fallback_colour)
+        pool = S_POOL if fallback_size == "BIG" else B_POOL
+        pool_copy = pool[:]
+        random.shuffle(pool_copy)
+        fallback_opps = pool_copy[:2]
+        fallback_num = fallback_opps[0] if fallback_opps else current_number
 
         return {
-            "prediction": fallback_nums[0],
+            "prediction": fallback_num,
             "bigSmall": fallback_size,
-            "confidence": "55%",
-            "numbers": fallback_nums,
-            "display": f"{fallback_nums[0]}/{fallback_nums[1]}",
+            "confidence": 55,
+            "numbers": [fallback_num],
+            "opposites": fallback_opps,
             "steps": ["Fallback mode (no history)"],
             "source": "fallback"
         }
 
-    # SAAD VIP pipeline
-    latest = history[0]
-    next_period = next_issue(latest['period'])
-
-    result = execute_saad_vip_deterministic_pipeline(history, next_period)
+    # HTML prediction
+    result = html_predict(history)
 
     if not result:
         fallback_num = (current_number + 5) % 10
         return {
             "prediction": fallback_num,
             "bigSmall": get_big_small(fallback_num),
-            "confidence": "55%",
-            "numbers": [fallback_num, (fallback_num + 1) % 10],
-            "display": f"{fallback_num}/{(fallback_num + 1) % 10}",
+            "confidence": 55,
+            "numbers": [fallback_num],
+            "opposites": [],
             "steps": ["Fallback mode"],
             "source": "fallback"
         }
 
-    # Derive BIG/SMALL
-    big_small = derive_big_small_from_pipeline(result)
-
-    # Pick 2 numbers from SAME colour side (NO opposite)
-    final_numbers = pick_two_numbers_same_side(big_small, result['colour'])
-
-    # Display string like "9/7" or "8/6"
-    display_str = f"{final_numbers[0]}/{final_numbers[1]}"
+    # Prediction number — first opposite (same as HTML display order)
+    number = result['opposites'][0] if result['opposites'] else current_number
 
     final_result = {
-        "prediction": final_numbers[0],
-        "bigSmall": big_small,
+        "prediction": number,
+        "bigSmall": result['size'],
         "confidence": result['confidence'],
-        "numbers": final_numbers,
-        "display": display_str,
+        "numbers": result['opposites'],                 # Opposite numbers list
+        "opposites": result['opposites'],               # NEW FIELD
         "steps": [
             f"Period: {period}",
-            f"Next Issue: {next_period}",
-            f"Sum(23): {sum(r['number'] for r in history[:23])}",
-            f"Computed: {result['primary']} | Override: {result['override']}",
-            f"Mapping: {result['reason']}",
-            f"Derived Size: {big_small}",
-            f"Final Numbers: {display_str}"
+            f"Next Issue: {result['issue']}",
+            f"Last 5: {result['last5']}",
+            f"BIG Count: {result['big_count']}",
+            f"Prediction: {result['size']}",
+            f"Opposites: {result['opposites']}"
         ],
-        "source": "saad-vip-engine-3.0"
+        "source": "naveen-ai"
     }
 
-    # Cache
+    # Cache save
     final_result["_ts"] = time.time()
     _ENGINE_CACHE[period] = final_result
 
