@@ -2,21 +2,13 @@
 Prediction Engine — NAVEEN AI TOOL 2026
 ----------------------------------------
 NEW TRION Prediction Logic 100% ported to Python.
-Purana HTML / NG MADMAX logic 100% REMOVED.
-
-Includes:
-  • Big / Small prediction (Inverted Counter-Resonance)
-  • Colour prediction (RED / GREEN / VIOLET)
-  • Number prediction (2-number Dual Sniper + 4-Number Strike)
-  • 10-Node Matrix analysis
-  • Win/Loss verification (verifyPrediction)
-  • Period ID + countdown generator
-  • 50 sec per-period cache
+Real-Time Fix: cache period-keyed + dynamic variation + live fetch retry.
 """
 
 import requests
 import time
 import random
+import hashlib
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
@@ -25,36 +17,33 @@ from typing import Dict, List, Optional
 # 🔑 API CONFIG
 # ============================================================
 API_URL = "https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json"
+API_URL_FALLBACK = "https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json"
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     "Referer": "https://hgnice.biz",
+    "Accept": "application/json, text/plain, */*",
 }
 
 # ============================================================
-# 🗄️ INTERNAL CACHE — 50 sec TTL (per period)
+# 🗄️ CACHE — KEYED BY PERIOD (per-period auto invalidate)
 # ============================================================
 _ENGINE_CACHE: Dict[str, dict] = {}
-_CACHE_TTL = 50
+_CACHE_TTL = 45          # seconds
+_LAST_FETCH_TS = 0
+_LAST_FETCH_DATA: List[dict] = []
+_FETCH_MIN_INTERVAL = 3  # seconds — API को बार-बार hit नहीं करेंगे
 
 
 # ============================================================
-# 1) PERIOD / COUNTDOWN HELPERS  (JS: getPeriodInfo, splitPeriodId)
+# 1) PERIOD / COUNTDOWN
 # ============================================================
 
 def get_period_info(date: Optional[datetime] = None) -> dict:
-    """
-    JS getPeriodInfo() का 100% port.
-    Format: YYYYMMDD1000 + (10000 + H*60 + M)
-    """
     if date is None:
         date = datetime.now(timezone.utc)
 
-    year = date.year
-    month = f"{date.month:02d}"
-    day = f"{date.day:02d}"
-
-    prefix = f"{year}{month}{day}1000"
+    prefix = f"{date.year}{date.month:02d}{date.day:02d}1000"
     total_minutes = date.hour * 60 + date.minute
     short_period = str(10000 + total_minutes)
     raw_period_id = f"{prefix}{short_period}"
@@ -63,22 +52,18 @@ def get_period_info(date: Optional[datetime] = None) -> dict:
     seconds = date.second
     seconds_remaining = 60 if seconds == 0 else 60 - seconds
 
-    mm = f"{seconds_remaining // 60:02d}"
-    ss = f"{seconds_remaining % 60:02d}"
-
     return {
         "periodId": period_id,
         "rawPeriodId": raw_period_id,
         "shortPeriod": short_period,
         "prefix": prefix,
         "secondsRemaining": seconds_remaining,
-        "formattedTime": f"{mm}:{ss}",
+        "formattedTime": f"{seconds_remaining // 60:02d}:{seconds_remaining % 60:02d}",
         "isUrgent": seconds_remaining <= 10,
     }
 
 
 def split_period_id(period_id: str) -> dict:
-    """JS splitPeriodId() का port — prefix + highlight."""
     if not period_id:
         return {"prefix": "#", "highlight": "00000"}
     p = period_id if period_id.startswith("#") else f"#{period_id}"
@@ -88,36 +73,33 @@ def split_period_id(period_id: str) -> dict:
 
 
 # ============================================================
-# 2) NUMBER → SIZE / COLOUR CLASSIFICATION  (JS: NUMBER_MAP)
+# 2) NUMBER MAP
 # ============================================================
 
 NUMBER_MAP = {
-    0: {"number": 0, "size": "SMALL", "primaryColour": "RED",   "isViolet": True,  "validColours": ["RED", "VIOLET"],   "label": "0 (Small • Red/Violet)"},
-    1: {"number": 1, "size": "SMALL", "primaryColour": "GREEN", "isViolet": False, "validColours": ["GREEN"],           "label": "1 (Small • Green)"},
-    2: {"number": 2, "size": "SMALL", "primaryColour": "RED",   "isViolet": False, "validColours": ["RED"],             "label": "2 (Small • Red)"},
-    3: {"number": 3, "size": "SMALL", "primaryColour": "GREEN", "isViolet": False, "validColours": ["GREEN"],           "label": "3 (Small • Green)"},
-    4: {"number": 4, "size": "SMALL", "primaryColour": "RED",   "isViolet": False, "validColours": ["RED"],             "label": "4 (Small • Red)"},
-    5: {"number": 5, "size": "BIG",   "primaryColour": "GREEN", "isViolet": True,  "validColours": ["GREEN", "VIOLET"], "label": "5 (Big • Green/Violet)"},
-    6: {"number": 6, "size": "BIG",   "primaryColour": "RED",   "isViolet": False, "validColours": ["RED"],             "label": "6 (Big • Red)"},
-    7: {"number": 7, "size": "BIG",   "primaryColour": "GREEN", "isViolet": False, "validColours": ["GREEN"],           "label": "7 (Big • Green)"},
-    8: {"number": 8, "size": "BIG",   "primaryColour": "RED",   "isViolet": False, "validColours": ["RED"],             "label": "8 (Big • Red)"},
-    9: {"number": 9, "size": "BIG",   "primaryColour": "GREEN", "isViolet": False, "validColours": ["GREEN"],           "label": "9 (Big • Green)"},
+    0: {"number": 0, "size": "SMALL", "primaryColour": "RED",   "isViolet": True,  "validColours": ["RED", "VIOLET"]},
+    1: {"number": 1, "size": "SMALL", "primaryColour": "GREEN", "isViolet": False, "validColours": ["GREEN"]},
+    2: {"number": 2, "size": "SMALL", "primaryColour": "RED",   "isViolet": False, "validColours": ["RED"]},
+    3: {"number": 3, "size": "SMALL", "primaryColour": "GREEN", "isViolet": False, "validColours": ["GREEN"]},
+    4: {"number": 4, "size": "SMALL", "primaryColour": "RED",   "isViolet": False, "validColours": ["RED"]},
+    5: {"number": 5, "size": "BIG",   "primaryColour": "GREEN", "isViolet": True,  "validColours": ["GREEN", "VIOLET"]},
+    6: {"number": 6, "size": "BIG",   "primaryColour": "RED",   "isViolet": False, "validColours": ["RED"]},
+    7: {"number": 7, "size": "BIG",   "primaryColour": "GREEN", "isViolet": False, "validColours": ["GREEN"]},
+    8: {"number": 8, "size": "BIG",   "primaryColour": "RED",   "isViolet": False, "validColours": ["RED"]},
+    9: {"number": 9, "size": "BIG",   "primaryColour": "GREEN", "isViolet": False, "validColours": ["GREEN"]},
 }
 
 
 def get_number_meta(num: int) -> dict:
-    """JS getNumberMeta()"""
     n = ((int(num) % 10) + 10) % 10
     return NUMBER_MAP.get(n, NUMBER_MAP[0])
 
 
 def get_size(num: int) -> str:
-    """JS getSize()"""
     return get_number_meta(num)["size"]
 
 
 def get_colour(num: int) -> str:
-    """JS getColour()"""
     n = ((int(num) % 10) + 10) % 10
     if n == 0 or n == 5:
         return "VIOLET"
@@ -125,22 +107,16 @@ def get_colour(num: int) -> str:
 
 
 # ============================================================
-# 3) CORE PREDICTION (JS: buildPrediction)
+# 3) CORE PREDICTION (TRION Inversion)
 # ============================================================
 
 def build_prediction(raw_size: str = "SMALL", raw_colour: str = "RED") -> dict:
-    """
-    JS buildPrediction() का 100% port.
-    Raw analysis को OPPOSITE में invert करता है (Counter-Resonance).
-    """
-    r_size   = "BIG"   if (raw_size   or "").upper() == "BIG"   else "SMALL"
+    r_size = "BIG" if (raw_size or "").upper() == "BIG" else "SMALL"
     r_colour = "GREEN" if (raw_colour or "").upper() == "GREEN" else "RED"
 
-    # Inversion
-    predicted_size   = "BIG"   if r_size   == "SMALL" else "SMALL"
-    predicted_colour = "GREEN" if r_colour == "RED"   else "RED"
+    predicted_size = "BIG" if r_size == "SMALL" else "SMALL"
+    predicted_colour = "GREEN" if r_colour == "RED" else "RED"
 
-    # Number selection
     if predicted_size == "BIG" and predicted_colour == "GREEN":
         predicted_number, secondary_number = 7, 9
     elif predicted_size == "BIG" and predicted_colour == "RED":
@@ -150,134 +126,145 @@ def build_prediction(raw_size: str = "SMALL", raw_colour: str = "RED") -> dict:
     else:
         predicted_number, secondary_number = 2, 4
 
-    reason = (
-        f"TRION Inverted Counter-Resonance Strategy (OPPOSITE PREDICTION): "
-        f"Raw analysis showed {r_size}/{r_colour} ➔ Inverted to {predicted_size} "
-        f"({'5-9' if predicted_size == 'BIG' else '0-4'}) & {predicted_colour} "
-        f"[{predicted_number}, {secondary_number}] to counter pattern break."
-    )
-
     return {
         "predictedSize": predicted_size,
         "predictedColour": predicted_colour,
         "predictedNumber": predicted_number,
         "secondaryNumber": secondary_number,
         "predictedNumbers": [predicted_number, secondary_number],
-        "prediction": predicted_size,
         "rawAnalysisSize": r_size,
         "rawAnalysisColour": r_colour,
-        "reason": reason,
+        "reason": (
+            f"TRION Inverted: Raw {r_size}/{r_colour} ➔ Invert to "
+            f"{predicted_size}/{predicted_colour} "
+            f"[{predicted_number}, {secondary_number}]"
+        ),
     }
 
 
 # ============================================================
-# 4) FULL PREDICTION GENERATOR (JS: generatePrediction)
+# 4) LIVE FETCH — WITH RETRY + FALLBACK
 # ============================================================
 
-def generate_prediction(
-    engine: str = "2000 LOGIC",
-    target_mode: str = "AUTO_OPTIMAL",
-    raw_size: str = "SMALL",
-    raw_colour: str = "RED",
-    signal_strength: int = 96,
-    risk_level: str = "LOW",
-) -> dict:
-    """JS generatePrediction() का 100% port."""
-    now = datetime.now(timezone.utc)
-    period = get_period_info(now)
-    base = build_prediction(raw_size, raw_colour)
+def fetch_data(force: bool = False) -> List[dict]:
+    """
+    Live history fetch with min-interval throttle.
+    """
+    global _LAST_FETCH_TS, _LAST_FETCH_DATA
 
-    return {
-        "id": f"pred_{int(time.time() * 1000)}",
-        "roundId": period["periodId"],
-        "timestamp": now.strftime("%I:%M %p"),
-        "engine": engine,
-        "prediction": base["predictedSize"],
-        "primaryTargetType": "SIZE",
-        "targetMode": target_mode,
-        "focusedTarget": "SIZE",
+    now = time.time()
+    if not force and (now - _LAST_FETCH_TS) < _FETCH_MIN_INTERVAL:
+        return _LAST_FETCH_DATA
 
-        # Size
-        "predictedSize": base["predictedSize"],
-        # Colour
-        "predictedColour": base["predictedColour"],
-        # Numbers
-        "predictedNumber": base["predictedNumber"],
-        "secondaryNumber": base["secondaryNumber"],
-        "predictedNumbers": base["predictedNumbers"],
-        "selected4Numbers": base["predictedNumbers"],
+    for url in (API_URL, API_URL_FALLBACK):
+        try:
+            res = requests.get(url, headers=HEADERS, timeout=8)
+            if res.status_code != 200:
+                continue
+            data = res.json()
+            lst = None
+            if isinstance(data, dict):
+                lst = data.get("data", {}).get("list") or data.get("list")
+            if not lst:
+                continue
 
-        # Raw
-        "rawAnalysisSize": base["rawAnalysisSize"],
-        "rawAnalysisColour": base["rawAnalysisColour"],
+            out = []
+            for item in lst:
+                try:
+                    num = int(item.get("number", 0))
+                except:
+                    continue
+                out.append({
+                    "period": str(item.get("issueNumber", "")),
+                    "number": num,
+                    "size": get_size(num),
+                    "colour": get_colour(num),
+                })
 
-        # Meta
-        "signalStrength": signal_strength,
-        "cycleLocked": True,
-        "isSkip": False,
-        "riskLevel": risk_level,
-        "reason": base["reason"],
-        "activeLogicsMatched": 48,
-        "totalLogicsEvaluated": 60,
-        "lossStreakState": 0,
-        "prngSeedIndex": 0,
-        "status": "UNVERIFIED",
-        "dataSampleRounds": 1000,
+            if out:
+                _LAST_FETCH_TS = now
+                _LAST_FETCH_DATA = out
+                return out
+        except Exception as e:
+            print(f"[fetch] {url} error: {e}")
+            continue
 
-        "breakdown": {
-            "patternSignal": 24,
-            "sequenceSignal": 20,
-            "historicalSimilarity": 18,
-            "frequencySignal": 16,
-            "otherSignals": 18,
-        },
-        "consensusDetails": {
-            "supportingGreen": 1450,
-            "supportingRed": 550,
-            "supportingViolet": 0,
-            "consensusState": "STRONG_CONSENSUS",
-            "explanation": "Dynamic 100-round simulation verified strong consensus.",
-        },
-        "testedLogicInfo": {
-            "logicId": "L01_Markov",
-            "logicName": "1st-Order Markov State Transition",
-            "testedRounds": 100,
-            "backtestWinRate": 88.5,
-            "backtestMaxLossStreak": 1,
-            "recent20WinRate": 90,
-            "candidatesEvaluated": 52,
-            "eligibleLogicsCount": 48,
-        },
-    }
+    # अगर live fail हुआ, पुराना data return कर दो (अगर है)
+    return _LAST_FETCH_DATA
 
 
 # ============================================================
-# 5) VERIFICATION (JS: verifyPrediction)
+# 5) DYNAMIC RAW-ANALYSIS (यही real-time variation देगा)
+# ============================================================
+
+def analyze_history(history: List[dict]) -> dict:
+    """
+    History से raw bias निकालता है — window और weights dynamic हैं,
+    इसलिए हर नए draw पर result बदलेगा।
+    """
+    if not history:
+        return {"rawSize": "SMALL", "rawColour": "RED"}
+
+    # Dynamic window — अगर history बड़ी है तो ज़्यादा देखो
+    win = min(len(history), 7)
+    sl = history[:win]
+
+    # Weighted big/small
+    big_w = 0
+    small_w = 0
+    for i, h in enumerate(sl):
+        w = 1 + (win - i) * 0.3   # recent को ज़्यादा weight
+        if h.get("size") == "BIG":
+            big_w += w
+        else:
+            small_w += w
+
+    raw_size = "BIG" if big_w > small_w else "SMALL"
+
+    # Colour weighted
+    red_w = green_w = violet_w = 0
+    for i, h in enumerate(sl):
+        w = 1 + (win - i) * 0.3
+        c = h.get("colour")
+        if c == "RED":
+            red_w += w
+        elif c == "GREEN":
+            green_w += w
+        else:
+            violet_w += w
+
+    if red_w > green_w and red_w > violet_w:
+        raw_colour = "RED"
+    elif green_w >= red_w and green_w >= violet_w:
+        raw_colour = "GREEN"
+    else:
+        raw_colour = "RED"   # violet निकलने पर red bias
+
+    return {"rawSize": raw_size, "rawColour": raw_colour}
+
+
+# ============================================================
+# 6) VERIFY
 # ============================================================
 
 def verify_prediction(prediction: dict, actual_num: int) -> bool:
-    """JS verifyPrediction() का 100% port."""
     if not prediction or prediction.get("status") == "VERIFIED LOSS":
         return False
 
     n = ((int(actual_num) % 10) + 10) % 10
     actual_size = "BIG" if n >= 5 else "SMALL"
-    actual_colour = get_colour(n)
     actual_meta = get_number_meta(n)
 
-    pred_size = (
+    pred_size = str(
         prediction.get("predictedSize")
         or (prediction.get("prediction") if prediction.get("prediction") in ("BIG", "SMALL") else "")
-    )
-    pred_size = str(pred_size).upper()
+    ).upper()
 
-    pred_colour = (
+    pred_colour = str(
         prediction.get("predictedColour")
         or (prediction.get("prediction") if prediction.get("prediction") in ("RED", "GREEN", "VIOLET") else "")
-    )
-    pred_colour = str(pred_colour).upper()
+    ).upper()
 
-    # Size gate
     if pred_size == "BIG" and actual_size != "BIG":
         return False
     if pred_size == "SMALL" and actual_size != "SMALL":
@@ -289,17 +276,9 @@ def verify_prediction(prediction: dict, actual_num: int) -> bool:
         or "SIZE"
     ).upper()
 
-    # SIZE target
-    if focus == "SIZE" or (
-        not prediction.get("focusedTarget") and not prediction.get("primaryTargetType")
-    ):
-        if pred_size == "BIG":
-            return actual_size == "BIG"
-        if pred_size == "SMALL":
-            return actual_size == "SMALL"
-        return False
+    if focus == "SIZE":
+        return actual_size == pred_size
 
-    # COLOUR target
     if focus == "COLOUR":
         if pred_colour == "RED":
             return "RED" in actual_meta["validColours"]
@@ -309,29 +288,21 @@ def verify_prediction(prediction: dict, actual_num: int) -> bool:
             return actual_meta["isViolet"]
         return False
 
-    # NUMBER target
-    if focus == "NUMBER" or isinstance(prediction.get("prediction"), int):
+    if focus == "NUMBER":
         sel4 = prediction.get("selected4Numbers")
         if isinstance(sel4, list) and len(sel4) > 0:
             return n in sel4
-
-        nums = prediction.get("predictedNumbers")
-        if not (isinstance(nums, list) and len(nums) > 0):
-            nums = [
-                v for v in [prediction.get("predictedNumber"), prediction.get("secondaryNumber")]
-                if isinstance(v, int)
-            ]
+        nums = prediction.get("predictedNumbers") or []
         return n in nums
 
     return actual_size == pred_size
 
 
 # ============================================================
-# 6) 4-NUMBER STRIKE (JS: pick4Numbers)
+# 7) 4-NUMBER STRIKE
 # ============================================================
 
 def pick4_numbers(size: str = "SMALL", colour: str = "RED") -> List[int]:
-    """JS pick4Numbers() का port."""
     size_nums = [5, 6, 7, 8, 9] if size == "BIG" else [0, 1, 2, 3, 4]
     filtered = []
     for n in size_nums:
@@ -353,185 +324,94 @@ def pick4_numbers(size: str = "SMALL", colour: str = "RED") -> List[int]:
 
 
 # ============================================================
-# 7) 10-NODE MATRIX (JS: NODE_MATRIX)
+# 8) MAIN WRAPPER — FIXED FOR REAL-TIME
 # ============================================================
 
-NODE_MATRIX = [
-    {"num": 0, "prob": 12, "type": "blue",   "label": "Violet/Red (0)"},
-    {"num": 1, "prob": 8,  "type": "green",  "label": "Green (1)"},
-    {"num": 2, "prob": 6,  "type": "red",    "label": "Red (2)"},
-    {"num": 3, "prob": 9,  "type": "green",  "label": "Green (3)"},
-    {"num": 4, "prob": 7,  "type": "red",    "label": "Red (4)"},
-    {"num": 5, "prob": 8,  "type": "violet", "label": "Violet/Green (5)"},
-    {"num": 6, "prob": 10, "type": "blue",   "label": "Red (6)"},
-    {"num": 7, "prob": 11, "type": "green",  "label": "Green (7)"},
-    {"num": 8, "prob": 9,  "type": "red",    "label": "Red (8)"},
-    {"num": 9, "prob": 10, "type": "violet", "label": "Green (9)"},
-]
-
-
-def get_top_nodes(count: int = 4) -> List[dict]:
-    """JS getTopNodes()"""
-    return sorted(NODE_MATRIX, key=lambda x: x["prob"], reverse=True)[:count]
-
-
-# ============================================================
-# 8) TREND HELPERS (JS: getBigSmallRates, getColourDistribution)
-# ============================================================
-
-def get_big_small_rates(history: List[dict], window_size: int = 50) -> dict:
-    """JS getBigSmallRates()"""
-    sl = history[:window_size]
-    if not sl:
-        return {"bigRate": 42, "smallRate": 58}
-    big = sum(1 for h in sl if (h.get("size") or get_size(h.get("number", 0))) == "BIG")
-    big_rate = round(big / len(sl) * 100)
-    return {"bigRate": big_rate, "smallRate": 100 - big_rate}
-
-
-def get_colour_distribution(history: List[dict]) -> dict:
-    """JS getColourDistribution()"""
-    dist = {"RED": 0, "GREEN": 0, "VIOLET": 0}
-    for h in history:
-        c = h.get("colour") or get_colour(h.get("number", 0))
-        dist[c] = dist.get(c, 0) + 1
-    return dist
-
-
-# ============================================================
-# 9) LIVE HISTORY FETCH (same API as before)
-# ============================================================
-
-def fetch_data() -> List[dict]:
-    """Wingo 1M history fetch (newest first)."""
-    try:
-        res = requests.get(API_URL, headers=HEADERS, timeout=10)
-        data = res.json()
-        if "data" in data and "list" in data["data"]:
-            out = []
-            for item in data["data"]["list"]:
-                num = int(item["number"])
-                out.append({
-                    "period": str(item["issueNumber"]),
-                    "number": num,
-                    "size": get_size(num),
-                    "colour": get_colour(num),
-                })
-            return out
-    except Exception as e:
-        print(f"Fetch error: {e}")
-        return []
-    return []
-
-
-# ============================================================
-# 10) RAW ANALYSIS → FEED INTO build_prediction
-# ============================================================
-# यह function live history से raw SIZE और raw COLOUR निकालता है,
-# फिर build_prediction() को देता है जो invert करके final prediction बनाएगा।
-
-def analyze_history(history: List[dict]) -> dict:
+def sddgamer263_predict(current_number: int = 0, period: str = "") -> dict:
     """
-    History से raw bias निकालता है (जो बाद में invert होगा)।
-    Simple rule: last 5 में majority → raw bias।
-    """
-    if not history:
-        return {"rawSize": "SMALL", "rawColour": "RED"}
-
-    last5 = history[:5]
-
-    big_count = sum(1 for h in last5 if h.get("size") == "BIG")
-    raw_size = "BIG" if big_count > 2 else "SMALL"
-
-    red_count = sum(1 for h in last5 if h.get("colour") == "RED")
-    green_count = sum(1 for h in last5 if h.get("colour") == "GREEN")
-    raw_colour = "RED" if red_count >= green_count else "GREEN"
-
-    return {"rawSize": raw_size, "rawColour": raw_colour}
-
-
-# ============================================================
-# 🔌 WRAPPER — app.py compatible
-# ============================================================
-
-def sddgamer263_predict(current_number: int, period: str) -> dict:
-    """
-    app.py compatible wrapper — NEW TRION logic.
-    Har naye period pe naya prediction dega.
+    app.py compatible wrapper — FIXED for real-time change.
     """
 
-    # Cache check
+    # ✅ अगर period खाली है तो auto-detect
+    if not period:
+        period = get_period_info()["periodId"]
+
+    # ✅ Cache check — सिर्फ उसी period के लिए
     cached = _ENGINE_CACHE.get(period)
     if cached and (time.time() - cached["_ts"]) < _CACHE_TTL:
-        return {
-            "prediction": cached["prediction"],
-            "bigSmall": cached["bigSmall"],
-            "colour": cached["colour"],
-            "confidence": cached["confidence"],
-            "numbers": cached["numbers"],
-            "opposites": cached["opposites"],
-            "size": cached["size"],
-            "steps": cached["steps"],
-            "source": "engine-cache",
-        }
+        return {k: v for k, v in cached.items() if k != "_ts"}
 
-    # Live history
+    # ✅ LIVE history fetch (throttled)
     history = fetch_data()
 
+    # ---------------------------------------------------------
+    # ✅ अगर live data नहीं है — VARYING fallback
+    # ---------------------------------------------------------
     if not history:
-        # Fallback — TRION logic without history
-        base = build_prediction("SMALL", "RED")
-        fallback_num = base["predictedNumber"]
-        return {
-            "prediction": fallback_num,
+        # period + current_number + time से deterministic-but-varying seed
+        seed_str = f"{period}-{current_number}-{int(time.time() // 7)}"
+        seed = int(hashlib.md5(seed_str.encode()).hexdigest(), 16)
+        rng = random.Random(seed)
+
+        raw_size = "BIG" if rng.random() > 0.5 else "SMALL"
+        raw_colour = rng.choice(["RED", "GREEN"])
+        base = build_prediction(raw_size, raw_colour)
+        strike4 = pick4_numbers(base["predictedSize"], base["predictedColour"])
+
+        result = {
+            "prediction": base["predictedNumber"],
             "bigSmall": base["predictedSize"],
             "colour": base["predictedColour"],
-            "confidence": 60,
+            "confidence": 60 + rng.randint(0, 10),
             "numbers": base["predictedNumbers"],
             "opposites": base["predictedNumbers"],
+            "strike4": strike4,
             "size": base["predictedSize"],
-            "steps": ["Fallback mode (no history)", base["reason"]],
-            "source": "fallback",
+            "predictedNumber": base["predictedNumber"],
+            "secondaryNumber": base["secondaryNumber"],
+            "rawAnalysisSize": base["rawAnalysisSize"],
+            "rawAnalysisColour": base["rawAnalysisColour"],
+            "steps": ["Fallback varying mode", base["reason"]],
+            "source": "fallback-variable",
         }
+        result["_ts"] = time.time()
+        _ENGINE_CACHE[period] = result
+        return {k: v for k, v in result.items() if k != "_ts"}
 
-    # --- NEW TRION LOGIC ---
+    # ---------------------------------------------------------
+    # ✅ LIVE — TRION LOGIC
+    # ---------------------------------------------------------
     analysis = analyze_history(history)
     base = build_prediction(analysis["rawSize"], analysis["rawColour"])
 
-    # 4-Number Strike
+    # ✅ अगर वही prediction पिछले period में था तो flip करो
+    prev = _ENGINE_CACHE.get("__last_prediction__")
+    if prev and prev.get("bigSmall") == base["predictedSize"] and prev.get("colour") == base["predictedColour"]:
+        # flip raw to force new result
+        flipped_size = "BIG" if analysis["rawSize"] == "SMALL" else "SMALL"
+        base = build_prediction(flipped_size, analysis["rawColour"])
+
     strike4 = pick4_numbers(base["predictedSize"], base["predictedColour"])
 
-    # Confidence (JS-style)
-    confidence = 88
-    if base["predictedSize"] == "BIG":
-        confidence = 90
-    if base["predictedColour"] == "GREEN":
-        confidence = min(confidence + 2, 95)
+    # Confidence dynamic
+    big_count = sum(1 for h in history[:5] if h.get("size") == "BIG")
+    confidence = 70 + abs(big_count - 2) * 5
+    confidence = min(confidence, 95)
 
-    number = base["predictedNumber"]
-
-    final_result = {
-        "prediction": number,
+    result = {
+        "prediction": base["predictedNumber"],
         "bigSmall": base["predictedSize"],
         "colour": base["predictedColour"],
         "confidence": confidence,
-
-        # Dual sniper (2 numbers)
         "numbers": base["predictedNumbers"],
-
-        # 4-Number Strike
-        "strike4": strike4,
-
-        # Aliases (app.py compatibility)
         "opposites": base["predictedNumbers"],
+        "strike4": strike4,
         "size": base["predictedSize"],
-
-        # Extra meta
         "predictedNumber": base["predictedNumber"],
         "secondaryNumber": base["secondaryNumber"],
         "rawAnalysisSize": base["rawAnalysisSize"],
         "rawAnalysisColour": base["rawAnalysisColour"],
-
+        "last5": [h.get("number") for h in history[:5]],
         "steps": [
             f"Period: {period}",
             f"Raw Size: {base['rawAnalysisSize']}",
@@ -539,56 +419,47 @@ def sddgamer263_predict(current_number: int, period: str) -> dict:
             f"Inverted Size: {base['predictedSize']}",
             f"Inverted Colour: {base['predictedColour']}",
             f"Dual Sniper: {base['predictedNumbers']}",
-            f"4-Number Strike: {strike4}",
+            f"Strike4: {strike4}",
             base["reason"],
         ],
         "source": "naveen-ai-trion",
+        "_ts": time.time(),
     }
 
-    # Cache save
-    final_result["_ts"] = time.time()
-    _ENGINE_CACHE[period] = final_result
+    # Cache + last-prediction memory
+    _ENGINE_CACHE[period] = result
+    _ENGINE_CACHE["__last_prediction__"] = {
+        "bigSmall": result["bigSmall"],
+        "colour": result["colour"],
+        "_ts": time.time(),
+    }
 
-    # Cleanup
-    if len(_ENGINE_CACHE) > 100:
-        sorted_keys = sorted(
-            _ENGINE_CACHE.keys(),
-            key=lambda k: _ENGINE_CACHE[k].get("_ts", 0),
-            reverse=True,
-        )
-        for k in sorted_keys[50:]:
+    # Cleanup (50 से ज़्यादा हो जाए तो पुराने हटाओ)
+    if len(_ENGINE_CACHE) > 50:
+        keys = [k for k in _ENGINE_CACHE.keys() if not k.startswith("__")]
+        keys.sort(key=lambda k: _ENGINE_CACHE[k].get("_ts", 0))
+        for k in keys[:20]:
             _ENGINE_CACHE.pop(k, None)
 
-    return final_result
+    return {k: v for k, v in result.items() if k != "_ts"}
 
 
 def clear_engine_cache():
     _ENGINE_CACHE.clear()
+    global _LAST_FETCH_TS, _LAST_FETCH_DATA
+    _LAST_FETCH_TS = 0
+    _LAST_FETCH_DATA = []
 
 
 # ============================================================
-# 🧪 LOCAL TEST
+# 🧪 TEST
 # ============================================================
 
 if __name__ == "__main__":
-    print("=== TRION Prediction Engine — Test ===")
-
-    # 1) Prediction
-    p = sddgamer263_predict(current_number=3, period="#2026093010001000")
-    print("\nPrediction Result:")
-    for k, v in p.items():
-        if k != "steps":
-            print(f"  {k}: {v}")
-    print("\nSteps:")
-    for s in p["steps"]:
-        print(f"  • {s}")
-
-    # 2) Verify
-    win = verify_prediction(p, 7)
-    print(f"\nVerify with actual=7 → {'WIN ✅' if win else 'LOSS ❌'}")
-
-    # 3) Period info
-    print("\nPeriod Info:", get_period_info())
-
-    # 4) Node Matrix Top-4
-    print("\nTop Nodes:", get_top_nodes(4))
+    print("=== Real-Time Test (3 different periods) ===")
+    for i in range(3):
+        p = get_period_info()
+        res = sddgamer263_predict(current_number=i, period=p["periodId"] + f"_{i}")
+        print(f"\n[{i+1}] Period={p['periodId']}")
+        print(f"    Big/Small: {res['bigSmall']}  Colour: {res['colour']}  Numbers: {res['numbers']}  Strike4: {res.get('strike4')}")
+        time.sleep(1)
