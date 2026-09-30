@@ -2,22 +2,12 @@
 TRION Prediction Engine — NAVEEN AI TOOL 2026
 ---------------------------------------------
 100% JS TRION logic ported to Python.
-Purana Python prediction logic 100% REMOVED.
-
-Includes:
-  • Period / countdown helpers       (JS: getPeriodInfo, splitPeriodId)
-  • Number → Size/Colour map          (JS: NUMBER_MAP, getNumberMeta, getSize, getColour)
-  • Inverted Counter-Resonance        (JS: buildPrediction)
-  • Full prediction object            (JS: generatePrediction)
-  • Win/Loss verification             (JS: verifyPrediction)
-  • 4-Number Strike                   (JS: pick4Numbers)
-  • 10-Node Matrix                    (JS: NODE_MATRIX, getTopNodes)
-  • Trend helpers                     (JS: getBigSmallRates, getColourDistribution)
-  • Live history fetch + 50-sec cache
+✅ SIZE / COLOUR / NUMBER focus rotation ADDED (JS same).
 """
 
 import requests
 import time
+import random
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
@@ -33,26 +23,32 @@ HEADERS = {
 }
 
 # ============================================================
-# 🗄️ INTERNAL CACHE — 50 sec TTL (per period)
+# 🗄️ CACHE + FOCUS MEMORY
 # ============================================================
 _ENGINE_CACHE: Dict[str, dict] = {}
 _CACHE_TTL = 50
 
+# 🔥 JS rotation state — हर scan पर focus बदलता है
+_FOCUS_STATE = {
+    "current": "SIZE",           # SIZE | COLOUR | NUMBER
+    "rotation_index": 0,
+    "rotation_cycle": ["SIZE", "COLOUR", "NUMBER"],  # JS order
+    "last_period": "",
+}
+
+# 🔥 Prediction history memory (anti-repeat)
+_LAST_PREDICTION = {"size": None, "colour": None, "focus": None}
+
 
 # ============================================================
-# 1) PERIOD / COUNTDOWN HELPERS  (JS: getPeriodInfo, splitPeriodId)
+# 1) PERIOD / COUNTDOWN HELPERS
 # ============================================================
 
 def get_period_info(date: Optional[datetime] = None) -> dict:
-    """JS getPeriodInfo() का 100% port."""
     if date is None:
         date = datetime.now(timezone.utc)
 
-    year = date.year
-    month = f"{date.month:02d}"
-    day = f"{date.day:02d}"
-
-    prefix = f"{year}{month}{day}1000"
+    prefix = f"{date.year}{date.month:02d}{date.day:02d}1000"
     total_minutes = date.hour * 60 + date.minute
     short_period = str(10000 + total_minutes)
     raw_period_id = f"{prefix}{short_period}"
@@ -61,22 +57,18 @@ def get_period_info(date: Optional[datetime] = None) -> dict:
     seconds = date.second
     seconds_remaining = 60 if seconds == 0 else 60 - seconds
 
-    mm = f"{seconds_remaining // 60:02d}"
-    ss = f"{seconds_remaining % 60:02d}"
-
     return {
         "periodId": period_id,
         "rawPeriodId": raw_period_id,
         "shortPeriod": short_period,
         "prefix": prefix,
         "secondsRemaining": seconds_remaining,
-        "formattedTime": f"{mm}:{ss}",
+        "formattedTime": f"{seconds_remaining // 60:02d}:{seconds_remaining % 60:02d}",
         "isUrgent": seconds_remaining <= 10,
     }
 
 
 def split_period_id(period_id: str) -> dict:
-    """JS splitPeriodId() का port."""
     if not period_id:
         return {"prefix": "#", "highlight": "00000"}
     p = period_id if period_id.startswith("#") else f"#{period_id}"
@@ -86,7 +78,7 @@ def split_period_id(period_id: str) -> dict:
 
 
 # ============================================================
-# 2) NUMBER → SIZE / COLOUR CLASSIFICATION  (JS: NUMBER_MAP)
+# 2) NUMBER → SIZE / COLOUR MAP
 # ============================================================
 
 NUMBER_MAP = {
@@ -104,18 +96,15 @@ NUMBER_MAP = {
 
 
 def get_number_meta(num: int) -> dict:
-    """JS getNumberMeta()"""
     n = ((int(num) % 10) + 10) % 10
     return NUMBER_MAP.get(n, NUMBER_MAP[0])
 
 
 def get_size(num: int) -> str:
-    """JS getSize()"""
     return get_number_meta(num)["size"]
 
 
 def get_colour(num: int) -> str:
-    """JS getColour()"""
     n = ((int(num) % 10) + 10) % 10
     if n == 0 or n == 5:
         return "VIOLET"
@@ -123,45 +112,40 @@ def get_colour(num: int) -> str:
 
 
 # ============================================================
-# 3) INVERTED COUNTER-RESONANCE (CORE LOGIC)  (JS: buildPrediction)
+# 3) INVERTED COUNTER-RESONANCE (CORE LOGIC)
 # ============================================================
 
 def build_prediction(raw_size: str = "SMALL", raw_colour: str = "RED") -> dict:
     """
-    JS buildPrediction() का 100% port.
-    Raw analysis को OPPOSITE में invert करता है (Counter-Resonance).
+    JS buildPrediction() 100% port.
     """
     r_size   = "BIG"   if (raw_size   or "").upper() == "BIG"   else "SMALL"
     r_colour = "GREEN" if (raw_colour or "").upper() == "GREEN" else "RED"
 
-    # Inversion
     predicted_size   = "BIG"   if r_size   == "SMALL" else "SMALL"
     predicted_colour = "GREEN" if r_colour == "RED"   else "RED"
 
-    # Number selection (inversion के अनुसार)
     if predicted_size == "BIG" and predicted_colour == "GREEN":
-        predicted_number, secondary_number = 7, 9
+        pn, sn = 7, 9
     elif predicted_size == "BIG" and predicted_colour == "RED":
-        predicted_number, secondary_number = 8, 6
+        pn, sn = 8, 6
     elif predicted_size == "SMALL" and predicted_colour == "GREEN":
-        predicted_number, secondary_number = 3, 1
+        pn, sn = 3, 1
     else:
-        predicted_number, secondary_number = 2, 4
+        pn, sn = 2, 4
 
     reason = (
-        f"TRION Inverted Counter-Resonance Strategy (OPPOSITE PREDICTION): "
-        f"Raw analysis showed {r_size}/{r_colour} ➔ Inverted to {predicted_size} "
-        f"({'5-9' if predicted_size == 'BIG' else '0-4'}) & {predicted_colour} "
-        f"[{predicted_number}, {secondary_number}] to counter pattern break."
+        f"TRION Inverted Counter-Resonance: Raw {r_size}/{r_colour} ➔ "
+        f"Invert to {predicted_size}/{predicted_colour} [{pn}, {sn}]"
     )
 
     return {
         "predictedSize": predicted_size,
         "predictedColour": predicted_colour,
-        "predictedNumber": predicted_number,
-        "secondaryNumber": secondary_number,
-        "predictedNumbers": [predicted_number, secondary_number],
-        "prediction": predicted_size,          # default target = SIZE
+        "predictedNumber": pn,
+        "secondaryNumber": sn,
+        "predictedNumbers": [pn, sn],
+        "prediction": predicted_size,
         "rawAnalysisSize": r_size,
         "rawAnalysisColour": r_colour,
         "reason": reason,
@@ -169,7 +153,39 @@ def build_prediction(raw_size: str = "SMALL", raw_colour: str = "RED") -> dict:
 
 
 # ============================================================
-# 4) FULL PREDICTION GENERATOR  (JS: generatePrediction)
+# 4) 🔥 FOCUS ROTATION — यही JS वाला system है
+# ============================================================
+
+def rotate_focus(period: str) -> str:
+    """
+    JS में हर नए period पर focusedTarget rotate होता है:
+    SIZE → COLOUR → NUMBER → SIZE → ...
+
+    यही logic यहाँ port किया गया है।
+    """
+    # अगर नया period है तो rotation advance करो
+    if _FOCUS_STATE["last_period"] != period:
+        _FOCUS_STATE["rotation_index"] = (_FOCUS_STATE["rotation_index"] + 1) % 3
+        _FOCUS_STATE["current"] = _FOCUS_STATE["rotation_cycle"][_FOCUS_STATE["rotation_index"]]
+        _FOCUS_STATE["last_period"] = period
+
+    return _FOCUS_STATE["current"]
+
+
+def get_current_focus() -> str:
+    return _FOCUS_STATE["current"]
+
+
+def force_set_focus(focus: str):
+    """Manual override (जैसे JS में onSelectTargetType)."""
+    focus = (focus or "").upper()
+    if focus in ("SIZE", "COLOUR", "NUMBER"):
+        _FOCUS_STATE["current"] = focus
+        _FOCUS_STATE["rotation_index"] = _FOCUS_STATE["rotation_cycle"].index(focus)
+
+
+# ============================================================
+# 5) FULL PREDICTION GENERATOR (JS: generatePrediction)
 # ============================================================
 
 def generate_prediction(
@@ -177,10 +193,11 @@ def generate_prediction(
     target_mode: str = "AUTO_OPTIMAL",
     raw_size: str = "SMALL",
     raw_colour: str = "RED",
+    focused_target: str = "SIZE",
     signal_strength: int = 96,
     risk_level: str = "LOW",
 ) -> dict:
-    """JS generatePrediction() का 100% port."""
+    """JS generatePrediction() 100% port + focusedTarget."""
     now = datetime.now(timezone.utc)
     period = get_period_info(now)
     base = build_prediction(raw_size, raw_colour)
@@ -191,25 +208,20 @@ def generate_prediction(
         "timestamp": now.strftime("%I:%M %p"),
         "engine": engine,
         "prediction": base["predictedSize"],
-        "primaryTargetType": "SIZE",
+        "primaryTargetType": focused_target,
         "targetMode": target_mode,
-        "focusedTarget": "SIZE",
+        "focusedTarget": focused_target,
 
-        # Size
         "predictedSize": base["predictedSize"],
-        # Colour
         "predictedColour": base["predictedColour"],
-        # Numbers
         "predictedNumber": base["predictedNumber"],
         "secondaryNumber": base["secondaryNumber"],
         "predictedNumbers": base["predictedNumbers"],
-        "selected4Numbers": base["predictedNumbers"],   # 4-Number Strike के लिए
+        "selected4Numbers": base["predictedNumbers"],
 
-        # Raw
         "rawAnalysisSize": base["rawAnalysisSize"],
         "rawAnalysisColour": base["rawAnalysisColour"],
 
-        # Meta
         "signalStrength": signal_strength,
         "cycleLocked": True,
         "isSkip": False,
@@ -217,65 +229,33 @@ def generate_prediction(
         "reason": base["reason"],
         "activeLogicsMatched": 48,
         "totalLogicsEvaluated": 60,
-        "lossStreakState": 0,
-        "prngSeedIndex": 0,
         "status": "UNVERIFIED",
         "dataSampleRounds": 1000,
-
-        "breakdown": {
-            "patternSignal": 24,
-            "sequenceSignal": 20,
-            "historicalSimilarity": 18,
-            "frequencySignal": 16,
-            "otherSignals": 18,
-        },
-        "consensusDetails": {
-            "supportingGreen": 1450,
-            "supportingRed": 550,
-            "supportingViolet": 0,
-            "consensusState": "STRONG_CONSENSUS",
-            "explanation": "Dynamic 100-round simulation verified strong consensus.",
-        },
-        "testedLogicInfo": {
-            "logicId": "L01_Markov",
-            "logicName": "1st-Order Markov State Transition",
-            "testedRounds": 100,
-            "backtestWinRate": 88.5,
-            "backtestMaxLossStreak": 1,
-            "recent20WinRate": 90,
-            "candidatesEvaluated": 52,
-            "eligibleLogicsCount": 48,
-        },
     }
 
 
 # ============================================================
-# 5) VERIFICATION LOGIC  (JS: verifyPrediction)
+# 6) VERIFICATION (JS: verifyPrediction)
 # ============================================================
 
 def verify_prediction(prediction: dict, actual_num: int) -> bool:
-    """JS verifyPrediction() का 100% port."""
     if not prediction or prediction.get("status") == "VERIFIED LOSS":
         return False
 
     n = ((int(actual_num) % 10) + 10) % 10
     actual_size = "BIG" if n >= 5 else "SMALL"
-    actual_colour = get_colour(n)
     actual_meta = get_number_meta(n)
 
-    pred_size = (
+    pred_size = str(
         prediction.get("predictedSize")
         or (prediction.get("prediction") if prediction.get("prediction") in ("BIG", "SMALL") else "")
-    )
-    pred_size = str(pred_size).upper()
+    ).upper()
 
-    pred_colour = (
+    pred_colour = str(
         prediction.get("predictedColour")
         or (prediction.get("prediction") if prediction.get("prediction") in ("RED", "GREEN", "VIOLET") else "")
-    )
-    pred_colour = str(pred_colour).upper()
+    ).upper()
 
-    # पहले Size check
     if pred_size == "BIG" and actual_size != "BIG":
         return False
     if pred_size == "SMALL" and actual_size != "SMALL":
@@ -287,23 +267,10 @@ def verify_prediction(prediction: dict, actual_num: int) -> bool:
         or "SIZE"
     ).upper()
 
-    # SIZE target
-    if focus == "SIZE" or (
-        not prediction.get("focusedTarget") and not prediction.get("primaryTargetType")
-    ):
-        if pred_size == "BIG":
-            return actual_size == "BIG"
-        if pred_size == "SMALL":
-            return actual_size == "SMALL"
-        return False
+    if focus == "SIZE":
+        return actual_size == pred_size
 
-    # COLOUR target
     if focus == "COLOUR":
-        if pred_size == "BIG" and actual_size != "BIG":
-            return False
-        if pred_size == "SMALL" and actual_size != "SMALL":
-            return False
-
         if pred_colour == "RED":
             return "RED" in actual_meta["validColours"]
         if pred_colour == "GREEN":
@@ -312,34 +279,21 @@ def verify_prediction(prediction: dict, actual_num: int) -> bool:
             return actual_meta["isViolet"]
         return False
 
-    # NUMBER target (4-Number Strike या Dual Sniper)
-    if focus == "NUMBER" or isinstance(prediction.get("prediction"), int):
-        if pred_size == "BIG" and actual_size != "BIG":
-            return False
-        if pred_size == "SMALL" and actual_size != "SMALL":
-            return False
-
+    if focus == "NUMBER":
         sel4 = prediction.get("selected4Numbers")
         if isinstance(sel4, list) and len(sel4) > 0:
             return n in sel4
-
-        nums = prediction.get("predictedNumbers")
-        if not (isinstance(nums, list) and len(nums) > 0):
-            nums = [
-                v for v in [prediction.get("predictedNumber"), prediction.get("secondaryNumber")]
-                if isinstance(v, int)
-            ]
+        nums = prediction.get("predictedNumbers") or []
         return n in nums
 
     return actual_size == pred_size
 
 
 # ============================================================
-# 6) NUMBER-FOCUSED PREDICTION (4-Number Strike)  (JS: pick4Numbers)
+# 7) 4-NUMBER STRIKE
 # ============================================================
 
 def pick4_numbers(size: str = "SMALL", colour: str = "RED") -> List[int]:
-    """JS pick4Numbers() का 100% port."""
     size_nums = [5, 6, 7, 8, 9] if size == "BIG" else [0, 1, 2, 3, 4]
     filtered = []
     for n in size_nums:
@@ -361,7 +315,7 @@ def pick4_numbers(size: str = "SMALL", colour: str = "RED") -> List[int]:
 
 
 # ============================================================
-# 7) NODE / MATRIX ANALYSIS (10-Node)  (JS: NODE_MATRIX)
+# 8) NODE MATRIX
 # ============================================================
 
 NODE_MATRIX = [
@@ -379,16 +333,14 @@ NODE_MATRIX = [
 
 
 def get_top_nodes(count: int = 4) -> List[dict]:
-    """JS getTopNodes()"""
     return sorted(NODE_MATRIX, key=lambda x: x["prob"], reverse=True)[:count]
 
 
 # ============================================================
-# 8) TREND / HISTORY HELPERS  (JS: getBigSmallRates, getColourDistribution)
+# 9) TREND HELPERS
 # ============================================================
 
 def get_big_small_rates(history: List[dict], window_size: int = 50) -> dict:
-    """JS getBigSmallRates() का 100% port."""
     sl = history[:window_size]
     if not sl:
         return {"bigRate": 42, "smallRate": 58}
@@ -398,7 +350,6 @@ def get_big_small_rates(history: List[dict], window_size: int = 50) -> dict:
 
 
 def get_colour_distribution(history: List[dict]) -> dict:
-    """JS getColourDistribution() का 100% port."""
     dist = {"RED": 0, "GREEN": 0, "VIOLET": 0}
     for h in history:
         c = h.get("colour") or get_colour(h.get("number", 0))
@@ -407,11 +358,10 @@ def get_colour_distribution(history: List[dict]) -> dict:
 
 
 # ============================================================
-# 9) LIVE HISTORY FETCH
+# 10) LIVE HISTORY FETCH
 # ============================================================
 
 def fetch_data() -> List[dict]:
-    """Wingo 1M history fetch (newest first)."""
     try:
         res = requests.get(API_URL, headers=HEADERS, timeout=10)
         data = res.json()
@@ -433,13 +383,10 @@ def fetch_data() -> List[dict]:
 
 
 # ============================================================
-# 10) RAW BIAS EXTRACTOR (history → buildPrediction का input)
+# 11) RAW BIAS EXTRACTOR
 # ============================================================
-# Note: यह सिर्फ raw bias निकालता है, जिसे buildPrediction() invert करेगा।
-# JS में यही raw bias UI/strategy layer से आता है।
 
 def extract_raw_bias(history: List[dict]) -> dict:
-    """History से raw bias निकालता है (जो buildPrediction() में invert होगा)."""
     if not history:
         return {"rawSize": "SMALL", "rawColour": "RED"}
 
@@ -456,81 +403,130 @@ def extract_raw_bias(history: List[dict]) -> dict:
 
 
 # ============================================================
-# 🔌 WRAPPER — app.py compatible
+# 12) 🔥 ANTI-REPEAT (JS जैसा force flip)
+# ============================================================
+
+def anti_repeat_flip(base: dict) -> dict:
+    """
+    अगर पिछला prediction same है तो ज़बरदस्ती flip करो।
+    """
+    last = _LAST_PREDICTION
+
+    if (last["size"] == base["predictedSize"]
+        and last["colour"] == base["predictedColour"]
+        and last["focus"] == get_current_focus()):
+
+        # Flip raw
+        new_raw_size = "BIG" if base["rawAnalysisSize"] == "SMALL" else "SMALL"
+        new_raw_colour = "GREEN" if base["rawAnalysisColour"] == "RED" else "RED"
+        base = build_prediction(new_raw_size, new_raw_colour)
+
+    # Memory update
+    _LAST_PREDICTION["size"] = base["predictedSize"]
+    _LAST_PREDICTION["colour"] = base["predictedColour"]
+    _LAST_PREDICTION["focus"] = get_current_focus()
+
+    return base
+
+
+# ============================================================
+# 🔌 MAIN WRAPPER — app.py compatible
 # ============================================================
 
 def sddgamer263_predict(current_number: int, period: str) -> dict:
     """
-    app.py compatible wrapper — 100% JS TRION logic.
-    Har naye period pe naya prediction dega (50 sec cache).
+    app.py compatible wrapper — 100% JS TRION logic
+    + FOCUS ROTATION (SIZE → COLOUR → NUMBER)
+    + ANTI-REPEAT FLIP
+
+    हर नए period पर:
+      Round 1 → SIZE prediction (BIG/SMALL)
+      Round 2 → COLOUR prediction (RED/GREEN)
+      Round 3 → NUMBER prediction (Dual Sniper)
+      Round 4 → SIZE...
     """
 
-    # Cache check
+    # ✅ Cache — same period पर same result
     cached = _ENGINE_CACHE.get(period)
     if cached and (time.time() - cached["_ts"]) < _CACHE_TTL:
-        return {
-            "prediction": cached["prediction"],
-            "bigSmall": cached["bigSmall"],
-            "colour": cached["colour"],
-            "confidence": cached["confidence"],
-            "numbers": cached["numbers"],
-            "opposites": cached["opposites"],
-            "size": cached["size"],
-            "steps": cached["steps"],
-            "source": "engine-cache",
-        }
+        return {k: v for k, v in cached.items() if k != "_ts"}
 
-    # Live history
+    # ✅ Focus rotate (हर नए period पर)
+    focus = rotate_focus(period)
+
+    # ✅ Live history
     history = fetch_data()
 
     if not history:
-        # Fallback — TRION build_prediction directly
-        base = build_prediction("SMALL", "RED")
-        return {
-            "prediction": base["predictedNumber"],
-            "bigSmall": base["predictedSize"],
-            "colour": base["predictedColour"],
-            "confidence": 60,
-            "numbers": base["predictedNumbers"],
-            "opposites": base["predictedNumbers"],
-            "size": base["predictedSize"],
-            "steps": ["Fallback mode (no history)", base["reason"]],
-            "source": "fallback",
-        }
+        # Fallback — vary with period seed
+        seed = int(abs(hash(period)) % 100000)
+        rng = random.Random(seed)
+        raw_size = rng.choice(["BIG", "SMALL"])
+        raw_colour = rng.choice(["RED", "GREEN"])
+        base = build_prediction(raw_size, raw_colour)
+        base = anti_repeat_flip(base)
+        strike4 = pick4_numbers(base["predictedSize"], base["predictedColour"])
 
-    # --- JS TRION LOGIC (100% ported) ---
+        result = _make_result(base, strike4, period, focus, confidence=65, source="fallback")
+        result["_ts"] = time.time()
+        _ENGINE_CACHE[period] = result
+        return {k: v for k, v in result.items() if k != "_ts"}
+
+    # ✅ JS TRION LOGIC
     raw = extract_raw_bias(history)
     base = build_prediction(raw["rawSize"], raw["rawColour"])
+    base = anti_repeat_flip(base)
 
-    # 4-Number Strike (JS pick4Numbers)
     strike4 = pick4_numbers(base["predictedSize"], base["predictedColour"])
 
-    # Confidence (JS-style)
-    confidence = 88
-    if base["predictedSize"] == "BIG":
-        confidence = 90
-    if base["predictedColour"] == "GREEN":
-        confidence = min(confidence + 2, 95)
+    # Dynamic confidence
+    big_count = sum(1 for h in history[:5] if h.get("size") == "BIG")
+    confidence = min(70 + abs(big_count - 2) * 5, 95)
 
-    number = base["predictedNumber"]
+    result = _make_result(base, strike4, period, focus, confidence, source="naveen-ai-trion")
 
-    final_result = {
-        "prediction": number,
+    # Cache save
+    result["_ts"] = time.time()
+    _ENGINE_CACHE[period] = result
+
+    if len(_ENGINE_CACHE) > 100:
+        keys = sorted(_ENGINE_CACHE.keys(), key=lambda k: _ENGINE_CACHE[k].get("_ts", 0))
+        for k in keys[:50]:
+            _ENGINE_CACHE.pop(k, None)
+
+    return {k: v for k, v in result.items() if k != "_ts"}
+
+
+def _make_result(base: dict, strike4: List[int], period: str, focus: str,
+                 confidence: int, source: str) -> dict:
+    """
+    Focus के हिसाब से main prediction चुनता है — JS की तरह।
+    """
+    if focus == "SIZE":
+        main_prediction = base["predictedSize"]           # BIG / SMALL
+    elif focus == "COLOUR":
+        main_prediction = base["predictedColour"]         # RED / GREEN
+    else:  # NUMBER
+        main_prediction = base["predictedNumbers"]        # [7, 9]
+
+    return {
+        # 🔥 MAIN prediction (focus के हिसाब से)
+        "prediction": main_prediction,
+        "focus": focus,
+        "focusedTarget": focus,
+
+        # ✅ हमेशा उपलब्ध fields (UI के लिए)
         "bigSmall": base["predictedSize"],
         "colour": base["predictedColour"],
-        "confidence": confidence,
-
-        # Dual sniper (2 numbers)
-        "numbers": base["predictedNumbers"],
-
-        # 4-Number Strike
-        "strike4": strike4,
-
-        # Aliases (app.py compatibility)
-        "opposites": base["predictedNumbers"],
         "size": base["predictedSize"],
 
-        # Extra meta
+        # Numbers
+        "numbers": base["predictedNumbers"],
+        "opposites": base["predictedNumbers"],
+        "strike4": strike4,
+
+        # Meta
+        "confidence": confidence,
         "predictedNumber": base["predictedNumber"],
         "secondaryNumber": base["secondaryNumber"],
         "rawAnalysisSize": base["rawAnalysisSize"],
@@ -538,6 +534,7 @@ def sddgamer263_predict(current_number: int, period: str) -> dict:
 
         "steps": [
             f"Period: {period}",
+            f"Focus: {focus}",
             f"Raw Size: {base['rawAnalysisSize']}",
             f"Raw Colour: {base['rawAnalysisColour']}",
             f"Inverted Size: {base['predictedSize']}",
@@ -546,59 +543,32 @@ def sddgamer263_predict(current_number: int, period: str) -> dict:
             f"4-Number Strike: {strike4}",
             base["reason"],
         ],
-        "source": "naveen-ai-trion",
+        "source": source,
     }
-
-    # Cache save
-    final_result["_ts"] = time.time()
-    _ENGINE_CACHE[period] = final_result
-
-    # Cleanup
-    if len(_ENGINE_CACHE) > 100:
-        sorted_keys = sorted(
-            _ENGINE_CACHE.keys(),
-            key=lambda k: _ENGINE_CACHE[k].get("_ts", 0),
-            reverse=True,
-        )
-        for k in sorted_keys[50:]:
-            _ENGINE_CACHE.pop(k, None)
-
-    return final_result
 
 
 def clear_engine_cache():
     _ENGINE_CACHE.clear()
+    _LAST_PREDICTION["size"] = None
+    _LAST_PREDICTION["colour"] = None
+    _LAST_PREDICTION["focus"] = None
+    _FOCUS_STATE["rotation_index"] = 0
+    _FOCUS_STATE["current"] = "SIZE"
+    _FOCUS_STATE["last_period"] = ""
 
 
 # ============================================================
-# 🧪 LOCAL TEST
+# 🧪 TEST — 6 periods, देखो focus कैसे बदलता है
 # ============================================================
 
 if __name__ == "__main__":
-    print("=== TRION Prediction Engine (100% JS Port) — Test ===")
-
-    # 1) Prediction
-    p = sddgamer263_predict(current_number=3, period="#2026093010001000")
-    print("\nPrediction Result:")
-    for k, v in p.items():
-        if k != "steps":
-            print(f"  {k}: {v}")
-    print("\nSteps:")
-    for s in p["steps"]:
-        print(f"  • {s}")
-
-    # 2) Verify
-    win = verify_prediction(p, 7)
-    print(f"\nVerify with actual=7 → {'WIN ✅' if win else 'LOSS ❌'}")
-
-    # 3) Period info
-    print("\nPeriod Info:", get_period_info())
-
-    # 4) Node Matrix Top-4
-    print("\nTop Nodes:", get_top_nodes(4))
-
-    # 5) JS-style generatePrediction
-    gp = generate_prediction(raw_size="SMALL", raw_colour="RED")
-    print("\nJS generate_prediction() → predictedSize:", gp["predictedSize"],
-          "| predictedColour:", gp["predictedColour"],
-          "| numbers:", gp["predictedNumbers"])
+    print("=== Focus Rotation Test (6 periods) ===\n")
+    for i in range(6):
+        period = f"#202609301000100{i}"
+        res = sddgamer263_predict(current_number=i, period=period)
+        print(f"[{i+1}] Period={period[-5:]}  Focus={res['focus']:6s}  "
+              f"Main={res['prediction']}")
+        print(f"     Big/Small={res['bigSmall']:5s}  "
+              f"Colour={res['colour']:5s}  "
+              f"Numbers={res['numbers']}  Strike4={res['strike4']}")
+        print()
