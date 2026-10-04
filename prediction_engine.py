@@ -1,103 +1,70 @@
 """
-CYBER TAMILAN — SINGLE FILE PYTHON PORT
-========================================
-100% HTML <script> prediction logic.
-Old Python engines (MAFIYA, RIFU, Bunny, 7-Layer, Ensemble,
-Hyper, 11-Pattern, Ultimate Pro, etc.) — REMOVED.
+CYBER TAMILAN — PYTHON PORT
+================================
+100% port of the HTML <script> prediction engine.
 
-Run:
-    python cyber_tamilan.py
+REMOVED (old Python logic):
+  ❌ MAFIYA AI Engine
+  ❌ 250+ Pattern Database
+  ❌ 200+ CPU Patterns (Bunny AI)
+  ❌ RIFU Engine
+  ❌ Ultimate Pro Engine
+  ❌ Hyper Engine (8 Logic Modes)
+  ❌ Ensemble Voting
+  ❌ 7-Layer WEBC0DC V2 Engine
+  ❌ 11-Pattern Engine
+  ❌ 30-Round Ratio
+  ❌ 2-Level Fixed Win
+  ❌ Anti-Loss Strategy (old style)
+
+ADDED (new HTML logic, 100%):
+  ✅ ultraPatternEngine()
+  ✅ assessRisk()
+  ✅ getSmartAdvice()
+  ✅ Live streak / volatility / pattern-power
+  ✅ ANTI-LOSS reversal (after 3 consecutive losses)
 """
 
 import time
 import math
-import json
-import urllib.request
-import urllib.error
 from datetime import datetime, timezone
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Optional, Any
 
 
 # ============================================================
 # CONSTANTS (mirrors HTML)
 # ============================================================
-CURRENT_API = "https://api.bdg88zf.com/api/webapi/GetGameIssue"
-HISTORY_API = "https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json"
-
-REQUEST_DATA = {
-    "typeId": 1,
-    "language": 0,
-    "random": "e7fe6c090da2495ab8290dac551ef1ed",
-    "signature": "1F390E2B2D8A55D693E57FD905AE73A7",
-    "timestamp": 1723726679,
-}
-
 CONFIG = {
-    "HISTORY_LIMIT": 45,
+    "HISTORY_LIMIT": 45,       # engine uses slice(0, 45)
     "MIN_CONFIDENCE": 42,
     "MAX_CONFIDENCE": 77,
-    "ANTI_LOSS_THRESHOLD": 3,
-    "POLL_INTERVAL": 7.5,   # seconds (matches HTML setInterval 7500ms)
+    "ANTI_LOSS_THRESHOLD": 3,  # consecutiveLosses >= 3 triggers reversal
+    "CACHE_TTL": 50,
 }
 
 
 # ============================================================
 # HELPERS
 # ============================================================
+
 def get_big_small(n: int) -> str:
-    """JS: return n >= 5 ? "BIG" : "SMALL" """
+    """Mirrors JS:  return n >= 5 ? "BIG" : "SMALL" """
     try:
         return "BIG" if int(n) >= 5 else "SMALL"
     except (ValueError, TypeError):
         return "SMALL"
 
 
-def http_post_json(url: str, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    try:
-        data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
-            url,
-            data=data,
-            headers={
-                "Content-Type": "application/json",
-                "User-Agent": "Mozilla/5.0 (CyberTamilan/1.0)",
-            },
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.URLError, urllib.error.HTTPError, Exception) as e:
-        print(f"[HTTP POST ERROR] {url} -> {e}")
-        return None
-
-
-def http_get_json(url: str) -> Optional[Dict[str, Any]]:
-    try:
-        req = urllib.request.Request(
-            url,
-            headers={
-                "User-Agent": "Mozilla/5.0 (CyberTamilan/1.0)",
-                "Accept": "application/json",
-            },
-            method="GET",
-        )
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.URLError, urllib.error.HTTPError, Exception) as e:
-        print(f"[HTTP GET ERROR] {url} -> {e}")
-        return None
-
-
 # ============================================================
-# STATE (mirrors HTML globals)
+# STATE (mirrors HTML variables)
 # ============================================================
 class State:
     def __init__(self):
-        self.prediction_history: List[Dict[str, Any]] = []   # like predictionHistory[]
-        self.last_200_results: List[Dict[str, Any]] = []     # like last200Results[]
-        self.win_count: int = 0                              # like winCount
-        self.loss_count: int = 0                             # like lossCount
-        self.consecutive_losses: int = 0                     # like consecutiveLosses
+        self.prediction_history: List[Dict[str, Any]] = []
+        self.last_200_results: List[Dict[str, Any]] = []
+        self.win_count: int = 0
+        self.loss_count: int = 0
+        self.consecutive_losses: int = 0
 
     def reset(self):
         self.__init__()
@@ -113,10 +80,8 @@ def ultra_pattern_engine(history: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
     JS:
       function ultraPatternEngine(history){
-        if(!history||history.length<8) return {
-          prediction:"ANALYZING", confidence:30, patternPower:25,
-          streak:0, volatility:0.5, description:"Building matrix..."
-        };
+        if(!history||history.length<8)return{prediction:"ANALYZING",confidence:30,
+          patternPower:25,streak:0,volatility:0.5,description:"Building matrix..."};
         ...
       }
     """
@@ -133,12 +98,18 @@ def ultra_pattern_engine(history: List[Dict[str, Any]]) -> Dict[str, Any]:
     length = min(45, len(history))
     recent = history[:length]
 
-    big = sum(1 for r in recent if r.get("size") == "BIG")
-    small = length - big
+    big = 0
+    small = 0
+    for r in recent:
+        if r.get("size") == "BIG":
+            big += 1
+        else:
+            small += 1
+
     big_pct = big / length
     small_pct = small / length
 
-    # streak (from index 0)
+    # streak (consecutive same results from index 0)
     streak = 1
     limit = min(20, len(history))
     for i in range(1, limit):
@@ -171,25 +142,25 @@ def ultra_pattern_engine(history: List[Dict[str, Any]]) -> Dict[str, Any]:
     mb = ms / 78
 
     prediction = ""
-    raw_conf = 50.0
-    pattern_power = 45.0
+    raw_conf = 50
+    pattern_power = 45
     description = ""
 
-    # Branch 1 — REVERSAL
+    # ---- Branch 1: REVERSAL (streak >= 4)
     if streak >= 4:
         prediction = "SMALL" if history[0]["size"] == "BIG" else "BIG"
         raw_conf = 58 + min(30, streak * 5.5)
         pattern_power = 70 + (streak - 3) * 4
         description = f"REVERSAL: {streak}-streak exhaustion -> mean reversion"
 
-    # Branch 2 — ZIGZAG LOCK
+    # ---- Branch 2: ZIGZAG LOCK
     elif alt_ratio > 0.72 and length >= 10:
         prediction = "SMALL" if history[0]["size"] == "BIG" else "BIG"
         raw_conf = 62 + alt_ratio * 14
         pattern_power = 68
         description = f"ZIGZAG LOCK: {round(alt_ratio * 100)}% flip rate"
 
-    # Branch 3 — HEAVY BIG BIAS
+    # ---- Branch 3: HEAVY BIG BIAS
     elif big_pct > 0.70:
         prediction = "SMALL"
         b = (big_pct - 0.5) * 2.2
@@ -197,7 +168,7 @@ def ultra_pattern_engine(history: List[Dict[str, Any]]) -> Dict[str, Any]:
         pattern_power = 60 + b * 25
         description = f"HEAVY BIG BIAS {round(big_pct * 100)}% -> SMALL"
 
-    # Branch 4 — HEAVY SMALL BIAS
+    # ---- Branch 4: HEAVY SMALL BIAS
     elif small_pct > 0.70:
         prediction = "BIG"
         b = (small_pct - 0.5) * 2.2
@@ -205,7 +176,7 @@ def ultra_pattern_engine(history: List[Dict[str, Any]]) -> Dict[str, Any]:
         pattern_power = 60 + b * 25
         description = f"HEAVY SMALL BIAS {round(small_pct * 100)}% -> BIG"
 
-    # Branch 5 — TREND FOLLOW
+    # ---- Branch 5: TREND FOLLOW
     else:
         if mb > 0.15:
             prediction = "BIG"
@@ -218,7 +189,7 @@ def ultra_pattern_engine(history: List[Dict[str, Any]]) -> Dict[str, Any]:
         pattern_power = 52 + e * 0.6
         description = f"TREND FOLLOW: {prediction} favored"
 
-    # ANTI-LOSS REVERSAL (mirrors HTML)
+    # ---- ANTI-LOSS (mirrors HTML)
     if STATE.consecutive_losses >= CONFIG["ANTI_LOSS_THRESHOLD"]:
         old = prediction
         prediction = "SMALL" if prediction == "BIG" else "BIG"
@@ -228,7 +199,7 @@ def ultra_pattern_engine(history: List[Dict[str, Any]]) -> Dict[str, Any]:
         )
         raw_conf = min(76, raw_conf + 8)
 
-    # confidence clamp
+    # ---- Confidence clamp (mirrors JS)
     raw_conf = max(45, min(76, raw_conf - min(24, volatility * 45)))
 
     return {
@@ -236,7 +207,7 @@ def ultra_pattern_engine(history: List[Dict[str, Any]]) -> Dict[str, Any]:
         "confidence": int(min(77, max(42, raw_conf))),
         "patternPower": int(min(84, pattern_power)),
         "streak": streak,
-        "volatility": round(volatility, 2),
+        "volatility": float(f"{volatility:.2f}"),
         "description": description,
         "altRatio": alt_ratio,
     }
@@ -246,6 +217,20 @@ def ultra_pattern_engine(history: List[Dict[str, Any]]) -> Dict[str, Any]:
 # RISK ENGINE — 100% port of assessRisk()
 # ============================================================
 def assess_risk(engine: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    JS:
+      function assessRisk(e){
+        let s=0;
+        if(e.streak>=5)s+=40;else if(e.streak>=3)s+=22;
+        if(e.confidence<50)s+=28;else if(e.confidence<58)s+=14;else if(e.confidence>66)s-=8;
+        if(e.altRatio>0.7)s-=14;
+        s+=Math.floor(e.volatility*48);
+        s=Math.min(98,Math.max(5,s));
+        if(s<30)return{level:"LOW",cls:"text-green-600"};
+        if(s<60)return{level:"MEDIUM",cls:"text-yellow-600"};
+        return{level:"HIGH",cls:"text-red-600"};
+      }
+    """
     s = 0
 
     streak = engine.get("streak", 0)
@@ -262,10 +247,13 @@ def assess_risk(engine: Dict[str, Any]) -> Dict[str, Any]:
     elif confidence > 66:
         s -= 8
 
-    if engine.get("altRatio", 0) > 0.7:
+    alt_ratio = engine.get("altRatio", 0)
+    if alt_ratio > 0.7:
         s -= 14
 
-    s += math.floor(engine.get("volatility", 0.5) * 48)
+    volatility = engine.get("volatility", 0.5)
+    s += math.floor(volatility * 48)
+
     s = min(98, max(5, s))
 
     if s < 30:
@@ -282,6 +270,21 @@ def assess_risk(engine: Dict[str, Any]) -> Dict[str, Any]:
 # ADVICE ENGINE — 100% port of getSmartAdvice()
 # ============================================================
 def get_smart_advice(risk: Dict[str, Any], engine: Dict[str, Any]) -> str:
+    """
+    JS:
+      function getSmartAdvice(risk,engine){
+        if(consecutiveLosses>=3)return`ANTI-LOSS ACTIVE: ...`;
+        if(risk.level==="HIGH")return engine.streak>=4
+          ?"HIGH RISK + reversal zone: Skip this round."
+          :"HIGH RISK: Wait 1-2 rounds.";
+        if(risk.level==="MEDIUM")return engine.confidence>=58
+          ?"MEDIUM RISK + decent confidence: Moderate stake."
+          :"MEDIUM RISK: Small stake only.";
+        return engine.confidence>=64
+          ?"LOW RISK: Strong alignment. Stay disciplined."
+          :"LOW RISK: Good setup. Follow plan.";
+      }
+    """
     if STATE.consecutive_losses >= CONFIG["ANTI_LOSS_THRESHOLD"]:
         return (
             f"ANTI-LOSS ACTIVE: {STATE.consecutive_losses} losses. "
@@ -305,13 +308,38 @@ def get_smart_advice(risk: Dict[str, Any], engine: Dict[str, Any]) -> str:
 
 
 # ============================================================
-# UNIFIED PREDICT
+# SETTLE (updates win/loss + consecutive losses)
+# ============================================================
+def settle(prediction: str, actual: str) -> Dict[str, Any]:
+    """
+    Mirrors HTML modal trigger + counters.
+    Updates STATE.winCount, lossCount, consecutiveLosses.
+    """
+    if prediction == actual:
+        STATE.win_count += 1
+        STATE.consecutive_losses = 0
+        result = {"win": True, "status": "WIN"}
+    else:
+        STATE.loss_count += 1
+        STATE.consecutive_losses += 1
+        result = {"win": False, "status": "LOSS"}
+
+    return result
+
+
+# ============================================================
+# MAIN PREDICT — combines all three HTML functions
 # ============================================================
 def predict(history: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    history: list of dicts like [{"period": "...", "number": 7, "size": "BIG"}, ...]
+    Returns a full payload ready for UI / wrapper.
+    """
     engine = ultra_pattern_engine(history)
     risk = assess_risk(engine)
     advice = get_smart_advice(risk, engine)
 
+    # win-rate (mirrors HTML)
     total = STATE.win_count + STATE.loss_count
     win_rate = round(STATE.win_count / total * 100) if total > 0 else 0
 
@@ -336,171 +364,26 @@ def predict(history: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 # ============================================================
-# SETTLE — update win/loss + consecutive losses
-# ============================================================
-def settle(prediction: str, actual: str) -> Dict[str, Any]:
-    if prediction == actual:
-        STATE.win_count += 1
-        STATE.consecutive_losses = 0
-        return {"win": True, "status": "WIN"}
-    else:
-        STATE.loss_count += 1
-        STATE.consecutive_losses += 1
-        return {"win": False, "status": "LOSS"}
-
-
-# ============================================================
-# LIVE FETCHERS (mirrors HTML fetchAndAnalyze)
-# ============================================================
-def fetch_current_period() -> str:
-    payload = dict(REQUEST_DATA)
-    payload["timestamp"] = int(time.time())
-    data = http_post_json(CURRENT_API, payload)
-    if not data:
-        return "LOADING"
-    try:
-        return str(data.get("data", {}).get("issueNumber", "LOADING"))
-    except Exception:
-        return "LOADING"
-
-
-def fetch_history() -> List[Dict[str, Any]]:
-    url = f"{HISTORY_API}?ts={int(time.time() * 1000)}"
-    data = http_get_json(url)
-    if not data:
-        return []
-    try:
-        raw = data.get("data", {}).get("list", [])
-        results = []
-        for it in raw[:200]:
-            try:
-                num = int(it.get("number"))
-            except (ValueError, TypeError):
-                continue
-            results.append({
-                "period": str(it.get("issueNumber")),
-                "number": num,
-                "size": get_big_small(num),
-            })
-        return results
-    except Exception as e:
-        print(f"[HISTORY PARSE ERROR] {e}")
-        return []
-
-
-# ============================================================
-# MAIN TICK — mirrors HTML fetchAndAnalyze()
-# ============================================================
-def tick() -> None:
-    current_period = fetch_current_period()
-    print(f"\n[CURRENT PERIOD] {current_period}")
-
-    results = fetch_history()
-    if not results:
-        print("[WARN] No history data. Retrying next tick...")
-        return
-
-    STATE.last_200_results = results
-
-    # engine sees first 40 rows (like HTML: last200Results.slice(0,40))
-    engine_input = results[:40]
-    engine = ultra_pattern_engine(engine_input)
-    risk = assess_risk(engine)
-    advice = get_smart_advice(risk, engine)
-
-    print(f"PREDICTION     : {engine['prediction']}")
-    print(f"CONFIDENCE     : {engine['confidence']}%")
-    print(f"PATTERN POWER  : {engine['patternPower']}%")
-    print(f"STREAK         : {engine['streak']}")
-    print(f"VOLATILITY     : {round(engine['volatility'] * 100)}%")
-    print(f"REASON         : {engine['description']}")
-    print(f"RISK           : {risk['level']} (score={risk['score']})")
-    print(f"ADVICE         : {advice}")
-
-    # Register new prediction (mirrors HTML)
-    if (
-        engine["prediction"] != "ANALYZING"
-        and current_period != "LOADING"
-        and not any(p["period"] == current_period for p in STATE.prediction_history)
-    ):
-        STATE.prediction_history.insert(0, {
-            "period": current_period,
-            "prediction": engine["prediction"],
-            "actual": "--",
-            "status": "Waiting",
-            "confidence": engine["confidence"],
-            "risk": risk["level"],
-        })
-        if len(STATE.prediction_history) > 45:
-            STATE.prediction_history.pop()
-
-    # Settle any waiting predictions
-    for ph in STATE.prediction_history:
-        if ph["status"] == "Waiting":
-            found = next(
-                (h for h in STATE.last_200_results if h["period"] == ph["period"]),
-                None,
-            )
-            if found:
-                ph["actual"] = found["size"]
-                result = settle(ph["prediction"], found["size"])
-                ph["status"] = "Win" if result["win"] else "Loss"
-                print(
-                    f"[SETTLED] period={ph['period']} "
-                    f"pred={ph['prediction']} actual={ph['actual']} "
-                    f"-> {ph['status']}"
-                )
-
-    total = STATE.win_count + STATE.loss_count
-    win_rate = round(STATE.win_count / total * 100) if total > 0 else 0
-    print(f"WIN RATE       : {win_rate}%  ({STATE.win_count}W / {STATE.loss_count}L)")
-
-
-# ============================================================
-# MAIN LOOP
-# ============================================================
-def main():
-    print("=" * 65)
-    print("CYBER TAMILAN — PYTHON PORT (100% HTML LOGIC)")
-    print("=" * 65)
-    print(f"Poll interval: {CONFIG['POLL_INTERVAL']}s")
-    print("Press Ctrl+C to stop.\n")
-
-    try:
-        while True:
-            try:
-                tick()
-            except Exception as e:
-                print(f"[TICK ERROR] {e}")
-
-            time.sleep(CONFIG["POLL_INTERVAL"])
-    except KeyboardInterrupt:
-        print("\n[STOPPED] Shutting down...")
-        print(f"Final: {STATE.win_count}W / {STATE.loss_count}L")
-        total = STATE.win_count + STATE.loss_count
-        if total > 0:
-            print(f"Win rate: {round(STATE.win_count / total * 100)}%")
-
-
-# ============================================================
-# WRAPPER for external callers (app.py compatible)
+# CACHE + WRAPPER (app.py compatible)
 # ============================================================
 _CACHE: Dict[str, Dict[str, Any]] = {}
 
 
 def cyber_tamilan_predict(current_number: int, period: str) -> Dict[str, Any]:
     """
-    If your app.py calls this, pass current_number (0-9) + period string.
-    Uses synthetic history seeded by period.
+    Drop-in compatible wrapper.
+    Pass current_number (0-9) and period string.
     """
     cached = _CACHE.get(period)
-    if cached and (time.time() - cached["_ts"]) < CONFIG["POLL_INTERVAL"] * 6:
+    if cached and (time.time() - cached["_ts"]) < CONFIG["CACHE_TTL"]:
         return {k: v for k, v in cached.items() if k != "_ts"}
 
-    import random
+    # Build a synthetic history seed from period so results are stable per period
     seed = int(abs(hash(period)) % 100000)
+    import random
     rng = random.Random(seed)
 
+    # First element = current result (like HTML does with last200Results)
     current_size = get_big_small(current_number)
     history = [{"period": period, "number": current_number, "size": current_size}]
     for i in range(25):
@@ -536,7 +419,46 @@ def reset():
 
 
 # ============================================================
-# ENTRY
+# TEST
 # ============================================================
 if __name__ == "__main__":
-    main()
+    print("=" * 65)
+    print("CYBER TAMILAN — PYTHON PORT (100% HTML LOGIC)")
+    print("=" * 65)
+
+    # Simulate 25 rounds of history
+    import random
+    rng = random.Random(42)
+    hist = []
+    for i in range(25):
+        n = rng.randint(0, 9)
+        hist.append({"period": f"20250101{i:03d}", "number": n,
+                     "size": get_big_small(n)})
+
+    result = predict(hist)
+
+    print(f"\nPrediction    : {result['prediction']}")
+    print(f"Confidence    : {result['confidence']}%")
+    print(f"Pattern Power : {result['patternPower']}%")
+    print(f"Streak        : {result['streak']}")
+    print(f"Volatility    : {round(result['volatility'] * 100)}%")
+    print(f"Reason        : {result['description']}")
+    print(f"Risk Level    : {result['riskLevel']} (score={result['riskScore']})")
+    print(f"Advice        : {result['advice']}")
+    print(f"Win / Loss    : {result['winCount']}W / {result['lossCount']}L")
+    print(f"Win Rate      : {result['winRate']}%")
+    print(f"Anti-Loss     : {result['antiLossActive']}")
+
+    # Simulate 3 losses -> check anti-loss reversal
+    print("\n--- Simulating 3 losses ---")
+    for _ in range(3):
+        settle(result["prediction"], "SMALL" if result["prediction"] == "BIG" else "BIG")
+    result2 = predict(hist)
+    print(f"Prediction after 3L: {result2['prediction']}")
+    print(f"Consecutive Losses : {result2['consecutiveLosses']}")
+    print(f"Anti-Loss Active   : {result2['antiLossActive']}")
+    print(f"Advice             : {result2['advice']}")
+
+    print("\n" + "=" * 65)
+    print("All HTML logic ported. Old Python engines removed.")
+    print("=" * 65)
