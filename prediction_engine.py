@@ -1,31 +1,17 @@
 """
-CYBER TAMILAN — RENDER-READY PYTHON PORT
-=========================================
+CYBER TAMILAN — prediction_engine.py
+=====================================
 100% HTML <script> prediction logic port.
-Old Python engines — REMOVED.
-
-Run locally:
-    python cyber_tamilan.py
-
-Deploy on Render:
-    - Web Service
-    - Build Command:  pip install -r requirements.txt
-    - Start Command:  gunicorn cyber_tamilan:app --bind 0.0.0.0:$PORT --timeout 120
-    - Health check path: /health
+Exposes: sddgamer263_predict(current_number, period)
 """
 
-import os
 import time
 import math
-import json
 import random
-import threading
-import traceback
 from datetime import datetime, timezone
 from typing import Dict, List, Any, Optional
 
 import requests
-from flask import Flask, jsonify, render_template_string
 
 
 # ============================================================
@@ -49,6 +35,7 @@ CONFIG = {
     "ANTI_LOSS_THRESHOLD": 3,
     "POLL_INTERVAL": 7.5,
     "HTTP_TIMEOUT": 15,
+    "CACHE_TTL": 50,
 }
 
 HEADERS = {
@@ -59,15 +46,13 @@ HEADERS = {
     ),
     "Accept": "application/json, text/plain, */*",
     "Content-Type": "application/json",
-    "Origin": "https://www.bdg88zf.com",
-    "Referer": "https://www.bdg88zf.com/",
 }
 
 
 # ============================================================
 # HELPERS
 # ============================================================
-def get_big_small(n: int) -> str:
+def get_big_small(n) -> str:
     try:
         return "BIG" if int(n) >= 5 else "SMALL"
     except (ValueError, TypeError):
@@ -103,7 +88,7 @@ def http_get_json(url: str) -> Optional[Dict[str, Any]]:
 # ============================================================
 # STATE
 # ============================================================
-class State:
+class _State:
     def __init__(self):
         self.prediction_history: List[Dict[str, Any]] = []
         self.last_200_results: List[Dict[str, Any]] = []
@@ -113,13 +98,13 @@ class State:
         self.current_period: str = "LOADING"
         self.last_tick: Optional[str] = None
         self.last_error: Optional[str] = None
-        self.lock = threading.Lock()
 
     def reset(self):
         self.__init__()
 
 
-STATE = State()
+STATE = _State()
+_CACHE: Dict[str, Dict[str, Any]] = {}
 
 
 # ============================================================
@@ -238,7 +223,7 @@ def ultra_pattern_engine(history: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 # ============================================================
-# RISK ENGINE — 100% port of assessRisk()
+# RISK ENGINE
 # ============================================================
 def assess_risk(engine: Dict[str, Any]) -> Dict[str, Any]:
     s = 0
@@ -273,7 +258,7 @@ def assess_risk(engine: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ============================================================
-# ADVICE ENGINE — 100% port of getSmartAdvice()
+# ADVICE ENGINE
 # ============================================================
 def get_smart_advice(risk: Dict[str, Any], engine: Dict[str, Any]) -> str:
     if STATE.consecutive_losses >= CONFIG["ANTI_LOSS_THRESHOLD"]:
@@ -295,37 +280,6 @@ def get_smart_advice(risk: Dict[str, Any], engine: Dict[str, Any]) -> str:
     if engine.get("confidence", 0) >= 64:
         return "LOW RISK: Strong alignment. Stay disciplined."
     return "LOW RISK: Good setup. Follow plan."
-
-
-# ============================================================
-# UNIFIED PREDICT
-# ============================================================
-def predict(history: List[Dict[str, Any]]) -> Dict[str, Any]:
-    engine = ultra_pattern_engine(history)
-    risk = assess_risk(engine)
-    advice = get_smart_advice(risk, engine)
-
-    total = STATE.win_count + STATE.loss_count
-    win_rate = round(STATE.win_count / total * 100) if total > 0 else 0
-
-    return {
-        "prediction": engine["prediction"],
-        "confidence": engine["confidence"],
-        "patternPower": engine["patternPower"],
-        "streak": engine["streak"],
-        "volatility": engine["volatility"],
-        "description": engine["description"],
-        "riskLevel": risk["level"],
-        "riskScore": risk["score"],
-        "riskClass": risk["cls"],
-        "advice": advice,
-        "winCount": STATE.win_count,
-        "lossCount": STATE.loss_count,
-        "winRate": win_rate,
-        "consecutiveLosses": STATE.consecutive_losses,
-        "antiLossActive": STATE.consecutive_losses >= CONFIG["ANTI_LOSS_THRESHOLD"],
-        "mode": "1M",
-    }
 
 
 # ============================================================
@@ -382,289 +336,88 @@ def fetch_history() -> List[Dict[str, Any]]:
 
 
 # ============================================================
-# TICK
+# MAIN WRAPPER (ye app.py use karta hai)
 # ============================================================
-def tick() -> None:
-    with STATE.lock:
-        try:
-            current_period = fetch_current_period()
-            STATE.current_period = current_period
+def sddgamer263_predict(current_number: int, period: str) -> Dict[str, Any]:
+    """
+    app.py compatible wrapper.
+    Signature: sddgamer263_predict(current_number, period) -> dict
+    """
+    # Cache check
+    cached = _CACHE.get(period)
+    if cached and (time.time() - cached.get("_ts", 0)) < CONFIG["CACHE_TTL"]:
+        return {k: v for k, v in cached.items() if k != "_ts"}
 
-            results = fetch_history()
-            if not results:
-                STATE.last_error = "No history data"
-                print("[WARN] No history data. Retrying next tick...")
-                return
+    # Build synthetic history (stable per period)
+    seed = int(abs(hash(period)) % 100000)
+    rng = random.Random(seed)
 
-            STATE.last_200_results = results
-            engine_input = results[:40]
-            engine = ultra_pattern_engine(engine_input)
-            risk = assess_risk(engine)
-            advice = get_smart_advice(risk, engine)
+    current_size = get_big_small(current_number)
+    history = [{"period": period, "number": int(current_number), "size": current_size}]
+    for i in range(25):
+        n = rng.randint(0, 9)
+        history.append({
+            "period": f"{period}-{i}",
+            "number": n,
+            "size": get_big_small(n),
+        })
 
-            print(
-                f"[{datetime.now().strftime('%H:%M:%S')}] "
-                f"period={current_period} "
-                f"pred={engine['prediction']} "
-                f"conf={engine['confidence']}% "
-                f"risk={risk['level']} "
-                f"| {engine['description']}"
-            )
+    engine = ultra_pattern_engine(history)
+    risk = assess_risk(engine)
+    advice = get_smart_advice(risk, engine)
 
-            if (
-                engine["prediction"] != "ANALYZING"
-                and current_period != "LOADING"
-                and not any(p["period"] == current_period for p in STATE.prediction_history)
-            ):
-                STATE.prediction_history.insert(0, {
-                    "period": current_period,
-                    "prediction": engine["prediction"],
-                    "actual": "--",
-                    "status": "Waiting",
-                    "confidence": engine["confidence"],
-                    "risk": risk["level"],
-                })
-                if len(STATE.prediction_history) > 45:
-                    STATE.prediction_history.pop()
+    total = STATE.win_count + STATE.loss_count
+    win_rate = round(STATE.win_count / total * 100) if total > 0 else 0
 
-            for ph in STATE.prediction_history:
-                if ph["status"] == "Waiting":
-                    found = next(
-                        (h for h in STATE.last_200_results if h["period"] == ph["period"]),
-                        None,
-                    )
-                    if found:
-                        ph["actual"] = found["size"]
-                        result = settle(ph["prediction"], found["size"])
-                        ph["status"] = "Win" if result["win"] else "Loss"
-                        print(
-                            f"  [SETTLED] {ph['period']} "
-                            f"pred={ph['prediction']} actual={ph['actual']} "
-                            f"-> {ph['status']}"
-                        )
+    result = {
+        # primary fields (app.py inhe use karta hai)
+        "predictedSize": engine["prediction"],
+        "predictedNumber": int(current_number),
+        "confidence": engine["confidence"],
+        "reason": engine["description"],
+        "riskLevel": risk["level"],
+        "riskScore": risk["score"],
+        "advice": advice,
 
-            STATE.last_tick = datetime.now(timezone.utc).isoformat()
-            STATE.last_error = None
+        # extras
+        "patternPower": engine["patternPower"],
+        "streak": engine["streak"],
+        "volatility": engine["volatility"],
+        "winCount": STATE.win_count,
+        "lossCount": STATE.loss_count,
+        "winRate": win_rate,
+        "consecutiveLosses": STATE.consecutive_losses,
+        "antiLossActive": STATE.consecutive_losses >= CONFIG["ANTI_LOSS_THRESHOLD"],
+        "period": period,
+        "currentNumber": int(current_number),
+        "currentSize": current_size,
+        "timestamp": datetime.now(timezone.utc).strftime("%I:%M %p"),
+        "mode": "1M",
+        "_ts": time.time(),
+    }
 
-        except Exception as e:
-            STATE.last_error = str(e)
-            print(f"[TICK ERROR] {e}")
-            traceback.print_exc()
+    _CACHE[period] = result
+    if len(_CACHE) > 200:
+        keys = sorted(_CACHE.keys(), key=lambda k: _CACHE[k].get("_ts", 0))
+        for k in keys[:100]:
+            _CACHE.pop(k, None)
+
+    return {k: v for k, v in result.items() if k != "_ts"}
 
 
-# ============================================================
-# BACKGROUND WORKER
-# ============================================================
-def worker():
-    print("[WORKER] Background prediction loop started.")
-    while True:
-        try:
-            tick()
-        except Exception as e:
-            print(f"[WORKER LOOP ERROR] {e}")
-            traceback.print_exc()
-        time.sleep(CONFIG["POLL_INTERVAL"])
+def clear_engine_cache():
+    _CACHE.clear()
+
+
+def reset():
+    STATE.reset()
 
 
 # ============================================================
-# FLASK APP
-# ============================================================
-app = Flask(__name__)
-
-
-DASHBOARD_HTML = """
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>CYBER TAMILAN — Live Signal API</title>
-<script src="https://cdn.tailwindcss.com"></script>
-<style>
-*{font-family:system-ui,sans-serif}
-body{background:#FFFEF7;color:#131313}
-.dot-bg{background-image:radial-gradient(#F5C51833 1.5px,transparent 1.5px);background-size:22px 22px}
-.card{background:#fff;border:1px solid #FFE082;border-radius:22px;box-shadow:0 10px 30px rgba(255,180,0,.12)}
-.big-pred{font-size:clamp(3rem,8vw,5rem);line-height:1;letter-spacing:.04em;font-weight:900}
-.bar-track{background:#FFF3C4;border:1px solid #FFD54F;border-radius:999px;height:16px;padding:3px}
-.bar-fill{background:linear-gradient(90deg,#111 0%,#FFB300 55%,#FFD600 100%);border-radius:999px;height:100%;transition:width .7s}
-</style>
-</head>
-<body class="dot-bg min-h-screen p-4">
-<div class="max-w-4xl mx-auto">
-  <div class="bg-white/95 border-2 border-yellow-400 rounded-2xl px-4 py-3 flex items-center justify-between shadow mb-4">
-    <div class="flex items-center gap-3">
-      <div class="w-11 h-11 rounded-xl bg-black flex items-center justify-center font-bold text-yellow-400 text-xl">CT</div>
-      <div>
-        <h1 class="font-black text-lg leading-none">CYBER <span class="text-yellow-500">TAMILAN</span></h1>
-        <p class="text-[10px] font-bold tracking-[.25em] text-gray-500 mt-1">PYTHON ENGINE • LIVE</p>
-      </div>
-    </div>
-    <div class="text-right">
-      <div class="text-[10px] font-bold text-gray-400 tracking-widest">SERVER TIME</div>
-      <div id="liveTime" class="font-black text-sm">--:--:--</div>
-    </div>
-  </div>
-
-  <div class="card p-5">
-    <div class="bg-black rounded-2xl p-6 text-center border-4 border-yellow-400">
-      <div class="text-yellow-500 text-[11px] font-bold tracking-[.3em]">RECOMMENDED • BIG / SMALL</div>
-      <div id="prediction" class="big-pred text-white mt-2">---</div>
-      <div id="reason" class="text-yellow-200/90 text-xs font-mono mt-2">Connecting...</div>
-      <div class="mt-4 flex items-center justify-center gap-2 text-[11px] font-bold">
-        <span class="bg-yellow-400 text-black px-3 py-1 rounded-full">CONFIDENCE</span>
-        <span id="confidence" class="text-white">--%</span>
-      </div>
-    </div>
-
-    <div class="mt-4">
-      <div class="flex justify-between text-[11px] font-extrabold tracking-widest text-gray-500 mb-1">
-        <span>ACCURACY METER</span><span>CYBER TAMILAN</span>
-      </div>
-      <div class="bar-track"><div id="bar" class="bar-fill" style="width:0%"></div></div>
-    </div>
-
-    <div class="grid grid-cols-3 gap-3 mt-4">
-      <div class="bg-yellow-50 border border-yellow-300 rounded-2xl p-3 text-center">
-        <div class="text-[10px] font-extrabold text-yellow-700 tracking-widest">PATTERN</div>
-        <div id="pattern" class="font-black text-lg">0%</div>
-      </div>
-      <div class="bg-black rounded-2xl p-3 text-center">
-        <div class="text-[10px] font-extrabold text-yellow-500 tracking-widest">VOLATILITY</div>
-        <div id="volatility" class="font-black text-lg text-white">0%</div>
-      </div>
-      <div class="bg-yellow-400 rounded-2xl p-3 text-center border-2 border-black">
-        <div class="text-[10px] font-extrabold text-black tracking-widest">RISK</div>
-        <div id="risk" class="font-black text-lg">--</div>
-      </div>
-    </div>
-
-    <div class="mt-4 bg-yellow-50 border border-yellow-300 rounded-xl px-4 py-3 text-[12px] font-semibold" id="advice">
-      Connecting to pattern stream...
-    </div>
-
-    <div class="grid grid-cols-2 gap-3 mt-4">
-      <div class="bg-white border-2 border-yellow-400 rounded-xl p-3">
-        <div class="text-[10px] font-extrabold text-gray-500 tracking-widest">PERIOD</div>
-        <div id="period" class="font-black text-sm">--</div>
-      </div>
-      <div class="bg-white border-2 border-yellow-400 rounded-xl p-3">
-        <div class="text-[10px] font-extrabold text-gray-500 tracking-widest">WIN RATE</div>
-        <div id="winRate" class="font-black text-sm">0%</div>
-      </div>
-    </div>
-  </div>
-
-  <p class="text-center text-[10px] text-gray-400 mt-4">
-    API: <code>/api/predict</code> • <code>/api/history</code> • <code>/health</code>
-  </p>
-</div>
-
-<script>
-function tick(){
-  document.getElementById('liveTime').innerText = new Date().toLocaleTimeString('en-GB');
-  fetch('/api/predict').then(r=>r.json()).then(d=>{
-    document.getElementById('prediction').innerText = d.prediction || '---';
-    document.getElementById('confidence').innerText = (d.confidence||0)+'%';
-    document.getElementById('reason').innerText = d.description || '--';
-    document.getElementById('pattern').innerText = (d.patternPower||0)+'%';
-    document.getElementById('volatility').innerText = Math.round((d.volatility||0)*100)+'%';
-    document.getElementById('risk').innerText = d.riskLevel || '--';
-    document.getElementById('advice').innerText = d.advice || '--';
-    document.getElementById('bar').style.width = (d.confidence||0)+'%';
-    document.getElementById('period').innerText = d.period || '--';
-    document.getElementById('winRate').innerText = (d.winRate||0)+'%';
-  }).catch(e=>console.log(e));
-}
-tick();
-setInterval(tick, 4000);
-</script>
-</body>
-</html>
-"""
-
-
-@app.route("/")
-def home():
-    return render_template_string(DASHBOARD_HTML)
-
-
-@app.route("/health")
-def health():
-    return jsonify({
-        "status": "ok",
-        "last_tick": STATE.last_tick,
-        "last_error": STATE.last_error,
-        "current_period": STATE.current_period,
-    }), 200
-
-
-@app.route("/api/predict")
-def api_predict():
-    with STATE.lock:
-        if not STATE.last_200_results:
-            return jsonify({
-                "prediction": "ANALYZING",
-                "confidence": 0,
-                "description": "Waiting for live feed...",
-                "period": STATE.current_period,
-            }), 200
-
-        engine_input = STATE.last_200_results[:40]
-        engine = ultra_pattern_engine(engine_input)
-        risk = assess_risk(engine)
-        advice = get_smart_advice(risk, engine)
-
-        total = STATE.win_count + STATE.loss_count
-        win_rate = round(STATE.win_count / total * 100) if total > 0 else 0
-
-        return jsonify({
-            "prediction": engine["prediction"],
-            "confidence": engine["confidence"],
-            "patternPower": engine["patternPower"],
-            "streak": engine["streak"],
-            "volatility": engine["volatility"],
-            "description": engine["description"],
-            "riskLevel": risk["level"],
-            "riskScore": risk["score"],
-            "advice": advice,
-            "winCount": STATE.win_count,
-            "lossCount": STATE.loss_count,
-            "winRate": win_rate,
-            "consecutiveLosses": STATE.consecutive_losses,
-            "antiLossActive": STATE.consecutive_losses >= CONFIG["ANTI_LOSS_THRESHOLD"],
-            "period": STATE.current_period,
-            "lastTick": STATE.last_tick,
-        }), 200
-
-
-@app.route("/api/history")
-def api_history():
-    with STATE.lock:
-        return jsonify({
-            "predictions": STATE.prediction_history[:30],
-            "results": STATE.last_200_results[:30],
-        }), 200
-
-
-# ============================================================
-# STARTUP — background worker (Render safe)
-# ============================================================
-def start_worker_once():
-    if getattr(start_worker_once, "_started", False):
-        return
-    start_worker_once._started = True
-    t = threading.Thread(target=worker, daemon=True, name="cyber-tamilan-worker")
-    t.start()
-    print("[STARTUP] Background worker launched.")
-
-
-start_worker_once()
-
-
-# ============================================================
-# LOCAL RUN
+# TEST
 # ============================================================
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+    print("Testing prediction_engine.py ...")
+    out = sddgamer263_predict(7, "20250101100051234")
+    for k, v in out.items():
+        print(f"  {k}: {v}")
