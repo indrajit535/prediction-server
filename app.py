@@ -1,10 +1,10 @@
 """
-FastAPI Prediction Server — Wingo 1 Min Mode (v5.0 FINAL)
+FastAPI Prediction Server — Wingo 1 Min Mode (v6.0 FINAL)
 ----------------------------------------------------------
 ✅ Firebase Integration (Key validation, Server status, Withdrawal)
 ✅ Admin Panel Control
 ✅ User Panel Auto Login/Logout
-✅ NAVEEN AI Prediction Engine (Har period naya prediction)
+✅ NAVEEN AI Prediction Engine (100% HTML logic port)
 ✅ Same period → Same prediction (cached 55 sec)
 """
 
@@ -40,7 +40,7 @@ init_firebase()
 app = FastAPI(
     title="Wingo Prediction API",
     description="Wingo 1M prediction server with Firebase auth + NAVEEN AI",
-    version="5.0.0"
+    version="6.0.0"
 )
 
 # CORS
@@ -118,7 +118,10 @@ def get_remaining_seconds():
 # ============================================================
 def fetch_history():
     try:
-        req = urllib.request.Request(HISTORY_API, headers={"User-Agent": "Mozilla/5.0"})
+        req = urllib.request.Request(
+            HISTORY_API,
+            headers={"User-Agent": "Mozilla/5.0"}
+        )
         with urllib.request.urlopen(req, timeout=8) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except Exception as e:
@@ -134,8 +137,16 @@ def fetch_live_period():
             next_period = str(int(current_issue) + 1)
         except ValueError:
             next_period = get_current_period()
-        return {"period": next_period, "remaining_seconds": get_remaining_seconds(), "source": "live"}
-    return {"period": get_current_period(), "remaining_seconds": get_remaining_seconds(), "source": "local"}
+        return {
+            "period": next_period,
+            "remaining_seconds": get_remaining_seconds(),
+            "source": "live"
+        }
+    return {
+        "period": get_current_period(),
+        "remaining_seconds": get_remaining_seconds(),
+        "source": "local"
+    }
 
 
 # ============================================================
@@ -171,17 +182,38 @@ def generate_prediction(period: Optional[str] = None,
         except (ValueError, TypeError):
             last_number = 0
 
-    # ✅ NAVEEN AI ENGINE CALL
-    result = sddgamer263_predict(current_number=last_number, period=period)
+    # ✅ NAVEEN AI ENGINE CALL — safe try/except
+    try:
+        result = sddgamer263_predict(current_number=last_number, period=period)
+    except Exception as e:
+        print(f"[ENGINE ERROR] {e}")
+        result = {
+            "bigSmall": "BIG" if last_number >= 5 else "SMALL",
+            "prediction": last_number,
+            "confidence": 50,
+            "numbers": [last_number],
+            "steps": ["fallback: engine error"],
+            "source": "fallback",
+        }
+
+    # ✅ Safe key access with defaults
+    big_small = result.get("bigSmall") or ("BIG" if last_number >= 5 else "SMALL")
+    number = result.get("prediction", last_number)
+    if not isinstance(number, int):
+        number = last_number if isinstance(last_number, int) else 0
+
+    numbers = result.get("numbers", [number])
+    if not isinstance(numbers, list) or not numbers:
+        numbers = [number]
 
     prediction = {
         "period": period,
         "gameId": game_id,
         "mode": "1m",
-        "bigSmallResult": result["bigSmall"],
-        "numberResult": result["prediction"],
-        "numbers": result.get("numbers", [result["prediction"]]),
-        "confidence": result["confidence"],
+        "bigSmallResult": big_small,
+        "numberResult": number,
+        "numbers": numbers,
+        "confidence": result.get("confidence", 50),
         "patternName": "NAVEEN AI v2026",
         "steps": result.get("steps", []),
         "source": result.get("source", "naveen-ai"),
@@ -255,7 +287,7 @@ def root():
     return {
         "status": "online",
         "mode": "wingo-1m",
-        "version": "5.0.0",
+        "version": "6.0.0",
         "engine": "NAVEEN AI v2026",
         "cachedPeriods": len(PREDICTION_CACHE)
     }
@@ -269,6 +301,11 @@ def firebase_config():
 @app.get("/server-status")
 def server_status():
     return get_server_status()
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "timestamp": int(time.time() * 1000)}
 
 
 # ============================================================
@@ -349,7 +386,7 @@ def auth_check(key: str = Query(...)):
 
 
 # ============================================================
-# 🎯 PREDICTION ENDPOINTS
+# 🎯 PREDICTION ENDPOINTS (Key Required)
 # ============================================================
 @app.get("/period")
 def period_info(key: str = Query(...)):
@@ -732,6 +769,9 @@ if os.path.isdir("static"):
     app.mount("/panel", StaticFiles(directory="static", html=True), name="static")
 
 
+# ============================================================
+# 🚀 ENTRY POINT
+# ============================================================
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
