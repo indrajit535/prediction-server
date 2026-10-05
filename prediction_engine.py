@@ -1,58 +1,67 @@
 """
 CYBER TAMILAN — prediction_engine.py
-=====================================
-Prediction logic:
-  1. Last 3 results me jo zyada ho (BIG/SMALL) wahi final prediction.
-  2. Zig-Zag detection (BSB / SBS) -> last result ka opposite.
-  3. Zig-Zag se normal switch jab BSS / SBB aaye.
-  4. Predicted number: last 10 results me jo numbers missing hain,
-     unme se highest frequency wala pick karo (BIG/SMALL category ke hisaab se).
-Exposes: sddgamer263_predict(current_number, period)
+
+Prediction engine requested behavior:
+
+1. Build the BIG/SMALL decision from the last three observed results.
+2. If the latest three sizes are BSB or SBS, enable ZIGZAG mode and
+   predict the opposite of the newest size.
+3. When a zig-zag sequence breaks (BSS or SBB), return to NORMAL mode.
+4. Select a predicted number independently from the current result.  Among
+   numbers matching the predicted size, prefer the least frequent numbers in
+   the last ten observed results.  Missing numbers therefore get priority.
+
+This is a heuristic only; it cannot guarantee future outcomes.
 """
 
+from __future__ import annotations
+
 import time
+from collections import Counter
 from datetime import datetime, timezone
-from typing import Dict, List, Any, Optional
-
-import requests
+from typing import Any, Dict, List, Optional
 
 
-# ============================================================
-# CONSTANTS
-# ============================================================
 CONFIG = {
-    "HTTP_TIMEOUT": 15,
     "CACHE_TTL": 50,
     "HISTORY_LIMIT": 10,
-}
-
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    ),
-    "Accept": "application/json, text/plain, */*",
-    "Content-Type": "application/json",
+    "CACHE_LIMIT": 200,
 }
 
 
-# ============================================================
-# HELPERS
-# ============================================================
-def get_big_small(n) -> str:
-    """0-4 = SMALL (RED), 5-9 = BIG (GREEN)"""
+# The engine stores actual observed results, not synthetic copies of the
+# current number.  This fixes the original last3_numbers bug.
+_RESULT_NUMBERS: List[int] = []
+_ZIGZAG_ACTIVE = False
+_CACHE: Dict[str, Dict[str, Any]] = {}
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def normalize_number(number: Any) -> int:
+    """Return a valid digit in the range 0..9."""
+    value = int(number)
+    if not 0 <= value <= 9:
+        raise ValueError("current_number must be an integer from 0 to 9")
+    return value
+
+
+def get_big_small(number: Any) -> str:
+    """0-4 = SMALL; 5-9 = BIG."""
     try:
-        return "BIG" if int(n) >= 5 else "SMALL"
-    except (ValueError, TypeError):
+        return "BIG" if int(number) >= 5 else "SMALL"
+    except (TypeError, ValueError):
         return "SMALL"
 
 
-def get_color(n) -> str:
-    """5-9 = GREEN, 0-4 = RED"""
+def get_color(number: Any) -> str:
+    """0-4 = RED; 5-9 = GREEN."""
     try:
-        return "GREEN" if int(n) >= 5 else "RED"
-    except (ValueError, TypeError):
+        return "GREEN" if int(number) >= 5 else "RED"
+    except (TypeError, ValueError):
         return "RED"
 
 
@@ -60,272 +69,214 @@ def opposite(size: str) -> str:
     return "SMALL" if size == "BIG" else "BIG"
 
 
-# ============================================================
-# STATE
-# ============================================================
-class _State:
-    def __init__(self):
-        self.prediction_history: List[Dict[str, Any]] = []
-        self.win_count: int = 0
-        self.loss_count: int = 0
-        self.consecutive_losses: int = 0
-        self.last_mode: str = "NORMAL"
-
-    def reset(self):
-        self.__init__()
+def _sizes(numbers: List[int]) -> List[str]:
+    return [get_big_small(number) for number in numbers]
 
 
-STATE = _State()
-_CACHE: Dict[str, Dict[str, Any]] = {}
-
-# Rolling window of sizes (BIG/SMALL)
-_RESULT_WINDOW: List[str] = []
-# Full history of actual numbers
-_RESULT_NUMBERS: List[int] = []
-# Zig-zag mode track
-_ZIGZAG_ACTIVE: bool = False
+def _short_size(size: str) -> str:
+    return "B" if size == "BIG" else "S"
 
 
-# ============================================================
-# NUMBER PICKING (NEW LOGIC)
-# ============================================================
-def _get_missing_numbers(last_n: int = 10) -> List[int]:
-    """
-    Last N results me jo numbers (0-9) nahi aaye, unki list.
-    Agar history chhoti hai to jo available hai usi se check karo.
-    """
-    if not _RESULT_NUMBERS:
-        return list(range(10))
-    recent = _RESULT_NUMBERS[-last_n:]
-    present = set(recent)
-    return [n for n in range(10) if n not in present]
+def _pattern(sizes: List[str]) -> str:
+    return "".join(_short_size(size) for size in sizes)
 
 
-def _get_frequency(number: int) -> int:
-    """Full history me number ki frequency."""
-    return _RESULT_NUMBERS.count(number)
+# ---------------------------------------------------------------------------
+# Size prediction
+# ---------------------------------------------------------------------------
 
 
-def _pick_predicted_number(prediction: str) -> int:
-    """
-    Prediction (BIG/SMALL) ke hisaab se number pick karo:
-      1. Last 10 results me missing numbers nikalo.
-      2. BIG prediction -> missing BIG numbers (5-9) me se
-         highest frequency wala lo.
-      3. SMALL prediction -> missing SMALL numbers (0-4) me se
-         highest frequency wala lo.
-      4. Agar us category me koi missing nahi, to us category ke
-         sabhi numbers me se highest frequency wala lo.
-    """
-    missing = _get_missing_numbers(10)
-
-    if prediction == "BIG":
-        candidates = [n for n in missing if n >= 5]
-        if not candidates:
-            candidates = list(range(5, 10))
-    else:
-        candidates = [n for n in missing if n < 5]
-        if not candidates:
-            candidates = list(range(0, 5))
-
-    # Highest frequency; tie pe chhota number pehle
-    best = max(candidates, key=lambda n: (_get_frequency(n), -n))
-    return best
-
-
-# ============================================================
-# CORE PREDICTION LOGIC (BIG/SMALL)
-# ============================================================
 def _detect_zigzag(last3: List[str]) -> bool:
-    """BSB ya SBS = zig-zag pattern."""
-    if len(last3) < 3:
-        return False
-    return last3[0] == last3[2] and last3[0] != last3[1]
+    """Return True for BSB or SBS."""
+    return len(last3) == 3 and last3[0] == last3[2] and last3[0] != last3[1]
 
 
 def _zigzag_broken(last3: List[str]) -> bool:
-    """BSS ya SBB = zig-zag toota."""
-    if len(last3) < 3:
-        return False
-    return last3[0] == last3[1] and last3[0] != last3[2]
+    """Return True for BSS or SBB: first two equal, newest differs."""
+    return len(last3) == 3 and last3[0] == last3[1] and last3[0] != last3[2]
 
 
 def _normal_prediction(last3: List[str]) -> str:
-    """Last 3 me jo zyada ho wahi prediction."""
+    """Choose the majority size; use the opposite of newest on a tie."""
     big_count = last3.count("BIG")
     small_count = last3.count("SMALL")
 
     if big_count > small_count:
         return "BIG"
-    elif small_count > big_count:
+    if small_count > big_count:
         return "SMALL"
-    else:
-        return opposite(last3[-1])
+    return opposite(last3[-1])
 
 
-def _build_prediction(last3: List[str]) -> Dict[str, Any]:
-    """
-    Main decision function (BIG/SMALL):
-      - Zig-zag detect karo
-      - Zig-zag active hai to last ka opposite
-      - Zig-zag toota to normal pe switch
-      - Warna normal: last 3 me jo zyada
-    """
+def _build_size_prediction(last3: List[str]) -> Dict[str, str]:
+    """Build the size prediction and maintain zig-zag mode."""
     global _ZIGZAG_ACTIVE
 
-    reason = ""
-    mode = "NORMAL"
-    pred = None
-
-    # --- Zig-Zag check ---
     if _detect_zigzag(last3):
         _ZIGZAG_ACTIVE = True
-        mode = "ZIGZAG"
-        pred = opposite(last3[-1])
-        reason = (
-            f"ZIGZAG detected ({''.join(last3)}) -> "
-            f"opposite of last ({last3[-1]}) = {pred}"
-        )
-        STATE.last_mode = "ZIGZAG"
-        return {"prediction": pred, "mode": mode, "reason": reason}
+        prediction = opposite(last3[-1])
+        return {
+            "prediction": prediction,
+            "mode": "ZIGZAG",
+            "reason": (
+                f"ZIGZAG detected ({_pattern(last3)}) -> "
+                f"opposite of newest {last3[-1]} = {prediction}"
+            ),
+        }
 
-    # --- Zig-Zag broken? ---
     if _ZIGZAG_ACTIVE and _zigzag_broken(last3):
         _ZIGZAG_ACTIVE = False
-        mode = "NORMAL"
-        reason = f"ZIGZAG broken ({''.join(last3)}) -> switching to NORMAL"
+        prediction = _normal_prediction(last3)
+        return {
+            "prediction": prediction,
+            "mode": "NORMAL",
+            "reason": (
+                f"ZIGZAG broken ({_pattern(last3)}) -> NORMAL majority "
+                f"prediction = {prediction}"
+            ),
+        }
 
-    # --- Normal prediction ---
-    if not _ZIGZAG_ACTIVE:
-        pred = _normal_prediction(last3)
-        if not reason:
-            big_c = last3.count("BIG")
-            small_c = last3.count("SMALL")
-            reason = (
-                f"NORMAL: last3={''.join(last3)} "
-                f"(BIG={big_c}, SMALL={small_c}) -> {pred}"
-            )
-        mode = "NORMAL"
-        STATE.last_mode = "NORMAL"
+    if _ZIGZAG_ACTIVE:
+        # Keep the mode only while the latest three remain alternating.  This
+        # prevents a stale zig-zag flag from forcing unrelated future results.
+        _ZIGZAG_ACTIVE = False
 
-    return {"prediction": pred, "mode": mode, "reason": reason}
+    prediction = _normal_prediction(last3)
+    return {
+        "prediction": prediction,
+        "mode": "NORMAL",
+        "reason": (
+            f"NORMAL: last3={_pattern(last3)} "
+            f"(BIG={last3.count('BIG')}, SMALL={last3.count('SMALL')}) "
+            f"-> {prediction}"
+        ),
+    }
 
 
-# ============================================================
-# MAIN WRAPPER
-# ============================================================
+# ---------------------------------------------------------------------------
+# Number selection
+# ---------------------------------------------------------------------------
+
+
+def _select_prediction_number(predicted_size: str, history: List[int]) -> Dict[str, Any]:
+    """Choose a low-frequency number matching the predicted size.
+
+    Missing numbers have frequency zero and are preferred automatically.  A
+    deterministic tie-breaker makes the output stable: newer-looking digits
+    are not preferred; the smallest digit wins ties.
+    """
+    recent = history[-CONFIG["HISTORY_LIMIT"] :]
+    frequencies = Counter(recent)
+    candidates = [
+        number
+        for number in range(10)
+        if get_big_small(number) == predicted_size
+    ]
+    candidates.sort(key=lambda number: (frequencies[number], number))
+    selected = candidates[0]
+
+    return {
+        "number": selected,
+        "color": get_color(selected),
+        "frequencyInLast10": frequencies[selected],
+        "candidateFrequencies": {
+            str(number): frequencies[number] for number in candidates
+        },
+        "recentNumbers": recent,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+
 def sddgamer263_predict(current_number: int, period: str) -> Dict[str, Any]:
-    """
-    app.py compatible wrapper.
-    current_number: 0-9
-    period: issue number / period string
-    """
-    global _RESULT_WINDOW, _RESULT_NUMBERS
+    """Record one observed result and predict the next result.
 
-    # Cache check
+    Args:
+        current_number: The newly observed digit, 0..9.
+        period: Unique issue/period identifier. Repeated periods are served
+            from the short-lived cache.
+    """
+    number = normalize_number(current_number)
+    period = str(period)
+
     cached = _CACHE.get(period)
-    if cached and (time.time() - cached.get("_ts", 0)) < CONFIG["CACHE_TTL"]:
-        return {k: v for k, v in cached.items() if k != "_ts"}
+    if cached and time.time() - cached["_ts"] < CONFIG["CACHE_TTL"]:
+        return {key: value for key, value in cached.items() if key != "_ts"}
 
-    current_size = get_big_small(current_number)
-    current_color = get_color(current_number)
+    _RESULT_NUMBERS.append(number)
+    del _RESULT_NUMBERS[:-CONFIG["HISTORY_LIMIT"]]
 
-    # Rolling window update (sizes)
-    _RESULT_WINDOW.append(current_size)
-    if len(_RESULT_WINDOW) > CONFIG["HISTORY_LIMIT"]:
-        _RESULT_WINDOW = _RESULT_WINDOW[-CONFIG["HISTORY_LIMIT"]:]
+    current_size = get_big_small(number)
+    current_color = get_color(number)
+    sizes = _sizes(_RESULT_NUMBERS)
+    last3 = sizes[-3:]
 
-    # Full history update (numbers)
-    _RESULT_NUMBERS.append(int(current_number))
-    # Cap history to avoid unbounded growth (keep last 500)
-    if len(_RESULT_NUMBERS) > 500:
-        _RESULT_NUMBERS = _RESULT_NUMBERS[-500:]
-
-    # Last 3 sizes
-    last3 = _RESULT_WINDOW[-3:] if len(_RESULT_WINDOW) >= 3 else _RESULT_WINDOW[:]
-
-    # Not enough data
     if len(last3) < 3:
-        result = {
+        result: Dict[str, Any] = {
             "predictedSize": "ANALYZING",
-            "predictedNumber": int(current_number),
+            "predictedNumber": None,
+            "predictedColor": None,
             "confidence": 40,
             "reason": f"Building window... ({len(last3)}/3)",
             "riskLevel": "MEDIUM",
             "riskScore": 50,
-            "advice": "Wait for 3 results.",
+            "advice": "Wait for three observed results.",
             "mode": "NORMAL",
+            "last3": _pattern(last3),
+            "last10Numbers": _RESULT_NUMBERS[-CONFIG["HISTORY_LIMIT"] :],
             "period": period,
-            "currentNumber": int(current_number),
+            "currentNumber": number,
             "currentSize": current_size,
             "currentColor": current_color,
             "timestamp": datetime.now(timezone.utc).strftime("%I:%M %p"),
             "_ts": time.time(),
         }
         _CACHE[period] = result
-        return {k: v for k, v in result.items() if k != "_ts"}
+        return {key: value for key, value in result.items() if key != "_ts"}
 
-    # BIG/SMALL prediction
-    pred_data = _build_prediction(last3)
+    size_data = _build_size_prediction(last3)
+    predicted_size = size_data["prediction"]
+    number_data = _select_prediction_number(predicted_size, _RESULT_NUMBERS)
 
-    # Predicted NUMBER using new logic
-    predicted_number = _pick_predicted_number(pred_data["prediction"])
-
-    # Confidence
-    if pred_data["mode"] == "ZIGZAG":
+    if size_data["mode"] == "ZIGZAG":
         confidence = 72
     else:
-        big_c = last3.count("BIG")
-        small_c = last3.count("SMALL")
-        diff = abs(big_c - small_c)
-        confidence = 55 + diff * 8
+        difference = abs(last3.count("BIG") - last3.count("SMALL"))
+        confidence = 55 + difference * 8
     confidence = max(42, min(77, confidence))
 
-    # Risk
-    if pred_data["mode"] == "ZIGZAG":
+    if size_data["mode"] == "ZIGZAG":
         risk_level, risk_score = "LOW", 28
+        advice = "ZIGZAG mode: predicted size is opposite to the newest size."
     elif confidence >= 70:
         risk_level, risk_score = "LOW", 25
+        advice = "LOW RISK: majority setup is stronger; use caution."
     elif confidence >= 58:
         risk_level, risk_score = "MEDIUM", 50
+        advice = "MEDIUM RISK: moderate confidence; consider skipping."
     else:
         risk_level, risk_score = "HIGH", 72
-
-    # Advice
-    if pred_data["mode"] == "ZIGZAG":
-        advice = "ZIGZAG active: play opposite of last result."
-    elif risk_level == "LOW":
-        advice = "LOW RISK: Strong setup. Follow plan."
-    elif risk_level == "MEDIUM":
-        advice = "MEDIUM RISK: Moderate stake."
-    else:
-        advice = "HIGH RISK: Small stake or skip."
-
-    total = STATE.win_count + STATE.loss_count
-    win_rate = round(STATE.win_count / total * 100) if total > 0 else 0
-
-    # Missing info (for transparency)
-    missing = _get_missing_numbers(10)
-    missing_freq = {n: _get_frequency(n) for n in missing}
+        advice = "HIGH RISK: low confidence; skip or use minimal exposure."
 
     result = {
-        "predictedSize": pred_data["prediction"],
-        "predictedNumber": predicted_number,
+        "predictedSize": predicted_size,
+        "predictedNumber": number_data["number"],
+        "predictedColor": number_data["color"],
+        "predictedNumberFrequencyInLast10": number_data["frequencyInLast10"],
+        "candidateFrequencies": number_data["candidateFrequencies"],
         "confidence": confidence,
-        "reason": pred_data["reason"],
+        "reason": size_data["reason"],
         "riskLevel": risk_level,
         "riskScore": risk_score,
         "advice": advice,
-        "mode": pred_data["mode"],
-        "last3": "".join(last3),
-        "missingNumbers": missing,
-        "missingFreq": missing_freq,
-        "winCount": STATE.win_count,
-        "lossCount": STATE.loss_count,
-        "winRate": win_rate,
-        "consecutiveLosses": STATE.consecutive_losses,
+        "mode": size_data["mode"],
+        "last3": _pattern(last3),
+        "last10Numbers": number_data["recentNumbers"],
         "period": period,
-        "currentNumber": int(current_number),
+        "currentNumber": number,
         "currentSize": current_size,
         "currentColor": current_color,
         "timestamp": datetime.now(timezone.utc).strftime("%I:%M %p"),
@@ -333,43 +284,33 @@ def sddgamer263_predict(current_number: int, period: str) -> Dict[str, Any]:
     }
 
     _CACHE[period] = result
-    if len(_CACHE) > 200:
-        keys = sorted(_CACHE.keys(), key=lambda k: _CACHE[k].get("_ts", 0))
-        for k in keys[:100]:
-            _CACHE.pop(k, None)
+    if len(_CACHE) > CONFIG["CACHE_LIMIT"]:
+        oldest = sorted(_CACHE, key=lambda key: _CACHE[key]["_ts"])
+        for key in oldest[: len(oldest) - CONFIG["CACHE_LIMIT"]]:
+            del _CACHE[key]
 
-    return {k: v for k, v in result.items() if k != "_ts"}
+    return {key: value for key, value in result.items() if key != "_ts"}
 
 
-def clear_engine_cache():
+def clear_engine_cache() -> None:
     _CACHE.clear()
 
 
-def reset():
-    global _RESULT_WINDOW, _RESULT_NUMBERS, _ZIGZAG_ACTIVE
-    STATE.reset()
-    _RESULT_WINDOW = []
-    _RESULT_NUMBERS = []
+def reset() -> None:
+    global _ZIGZAG_ACTIVE
+    _RESULT_NUMBERS.clear()
+    _CACHE.clear()
     _ZIGZAG_ACTIVE = False
 
 
-# ============================================================
-# TEST
-# ============================================================
 if __name__ == "__main__":
-    print("Testing prediction_engine.py ...")
     reset()
-    # Simulate a sequence
-    test_nums = [7, 5, 2, 8, 1, 9, 0, 6, 3, 4, 7, 8, 2, 5, 9]
-    for i, num in enumerate(test_nums):
-        out = sddgamer263_predict(num, f"P{i}")
+    print("Testing prediction_engine.py ...")
+    for index, number in enumerate([7, 5, 2, 8, 1, 9, 0, 6, 3, 4], start=1):
+        output = sddgamer263_predict(number, f"P{index}")
         print(
-            f"  num={num} size={out['currentSize']:5s} "
-            f"last3={out.get('last3','---'):3s} "
-            f"mode={out['mode']:6s} "
-            f"-> {out['predictedSize']:6s} #{out['predictedNumber']} "
-            f"({out['confidence']}%)"
+            f"num={number} size={output['currentSize']} "
+            f"last3={output['last3']} mode={output['mode']} "
+            f"-> {output['predictedSize']} / {output['predictedNumber']} "
+            f"({output['confidence']}%) | {output['reason']}"
         )
-        print(f"     reason: {out['reason']}")
-        if "missingNumbers" in out:
-            print(f"     missing: {out['missingNumbers']} freq: {out['missingFreq']}")
