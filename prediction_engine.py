@@ -5,6 +5,8 @@ Prediction logic:
   1. Last 3 results me jo zyada ho (BIG/SMALL) wahi final prediction.
   2. Zig-Zag detection (BSB / SBS) -> last result ka opposite.
   3. Zig-Zag se normal switch jab BSS / SBB aaye.
+  4. Predicted number: last 10 results me jo numbers missing hain,
+     unme se highest frequency wala pick karo (BIG/SMALL category ke hisaab se).
 Exposes: sddgamer263_predict(current_number, period)
 """
 
@@ -67,7 +69,7 @@ class _State:
         self.win_count: int = 0
         self.loss_count: int = 0
         self.consecutive_losses: int = 0
-        self.last_mode: str = "NORMAL"   # NORMAL or ZIGZAG
+        self.last_mode: str = "NORMAL"
 
     def reset(self):
         self.__init__()
@@ -76,51 +78,80 @@ class _State:
 STATE = _State()
 _CACHE: Dict[str, Dict[str, Any]] = {}
 
-# Last few results ka rolling window (sizes)
+# Rolling window of sizes (BIG/SMALL)
 _RESULT_WINDOW: List[str] = []
-# Zig-zag mode track karne ke liye
+# Full history of actual numbers
+_RESULT_NUMBERS: List[int] = []
+# Zig-zag mode track
 _ZIGZAG_ACTIVE: bool = False
 
 
 # ============================================================
-# CORE PREDICTION LOGIC
+# NUMBER PICKING (NEW LOGIC)
+# ============================================================
+def _get_missing_numbers(last_n: int = 10) -> List[int]:
+    """
+    Last N results me jo numbers (0-9) nahi aaye, unki list.
+    Agar history chhoti hai to jo available hai usi se check karo.
+    """
+    if not _RESULT_NUMBERS:
+        return list(range(10))
+    recent = _RESULT_NUMBERS[-last_n:]
+    present = set(recent)
+    return [n for n in range(10) if n not in present]
+
+
+def _get_frequency(number: int) -> int:
+    """Full history me number ki frequency."""
+    return _RESULT_NUMBERS.count(number)
+
+
+def _pick_predicted_number(prediction: str) -> int:
+    """
+    Prediction (BIG/SMALL) ke hisaab se number pick karo:
+      1. Last 10 results me missing numbers nikalo.
+      2. BIG prediction -> missing BIG numbers (5-9) me se
+         highest frequency wala lo.
+      3. SMALL prediction -> missing SMALL numbers (0-4) me se
+         highest frequency wala lo.
+      4. Agar us category me koi missing nahi, to us category ke
+         sabhi numbers me se highest frequency wala lo.
+    """
+    missing = _get_missing_numbers(10)
+
+    if prediction == "BIG":
+        candidates = [n for n in missing if n >= 5]
+        if not candidates:
+            candidates = list(range(5, 10))
+    else:
+        candidates = [n for n in missing if n < 5]
+        if not candidates:
+            candidates = list(range(0, 5))
+
+    # Highest frequency; tie pe chhota number pehle
+    best = max(candidates, key=lambda n: (_get_frequency(n), -n))
+    return best
+
+
+# ============================================================
+# CORE PREDICTION LOGIC (BIG/SMALL)
 # ============================================================
 def _detect_zigzag(last3: List[str]) -> bool:
-    """
-    BSB ya SBS = zig-zag pattern.
-    last3 = [oldest, middle, newest]
-    """
+    """BSB ya SBS = zig-zag pattern."""
     if len(last3) < 3:
         return False
     return last3[0] == last3[2] and last3[0] != last3[1]
 
 
 def _zigzag_broken(last3: List[str]) -> bool:
-    """
-    Zig-zag tootne ka signal: BSS ya SBB (ya RSS/GBB type)
-    Matlab pehle 2 same, teesra different.
-    """
+    """BSS ya SBB = zig-zag toota."""
     if len(last3) < 3:
         return False
     return last3[0] == last3[1] and last3[0] != last3[2]
 
 
-def _normal_prediction(last3: List[str], last3_numbers: List[int]) -> str:
-    """
-    Last 3 me jo zyada ho wahi prediction.
-    Color check bhi: agar 5/7 (GREEN) zyada -> opposite RED -> SMALL? 
-    Nahi, aapke hisaab se:
-      7/5/2 -> BIG zyada -> BIG prediction
-      Color 5/7 = GREEN -> opposite = RED -> matlab BIG (8/6)
-    Matlab BIG ka opposite SMALL nahi, balki BIG hi rahega kyunki
-    GREEN ka opposite RED hota hai jo SMALL hai... 
-    
-    Wait — aapne likha: "colour 5/7 matlab green to green ka opposite red 
-    to final prediction asa hoga BIG 8/6 number"
-    
-    Matlab: agar GREEN zyada hai to prediction BIG hi hoga (8/6).
-    Agar RED zyada hai to prediction SMALL hoga (2/4).
-    """
+def _normal_prediction(last3: List[str]) -> str:
+    """Last 3 me jo zyada ho wahi prediction."""
     big_count = last3.count("BIG")
     small_count = last3.count("SMALL")
 
@@ -129,13 +160,12 @@ def _normal_prediction(last3: List[str], last3_numbers: List[int]) -> str:
     elif small_count > big_count:
         return "SMALL"
     else:
-        # Tie: last result ka opposite (safe fallback)
         return opposite(last3[-1])
 
 
-def _build_prediction(last3: List[str], last3_numbers: List[int]) -> Dict[str, Any]:
+def _build_prediction(last3: List[str]) -> Dict[str, Any]:
     """
-    Main decision function:
+    Main decision function (BIG/SMALL):
       - Zig-zag detect karo
       - Zig-zag active hai to last ka opposite
       - Zig-zag toota to normal pe switch
@@ -145,6 +175,7 @@ def _build_prediction(last3: List[str], last3_numbers: List[int]) -> Dict[str, A
 
     reason = ""
     mode = "NORMAL"
+    pred = None
 
     # --- Zig-Zag check ---
     if _detect_zigzag(last3):
@@ -166,7 +197,7 @@ def _build_prediction(last3: List[str], last3_numbers: List[int]) -> Dict[str, A
 
     # --- Normal prediction ---
     if not _ZIGZAG_ACTIVE:
-        pred = _normal_prediction(last3, last3_numbers)
+        pred = _normal_prediction(last3)
         if not reason:
             big_c = last3.count("BIG")
             small_c = last3.count("SMALL")
@@ -189,7 +220,7 @@ def sddgamer263_predict(current_number: int, period: str) -> Dict[str, Any]:
     current_number: 0-9
     period: issue number / period string
     """
-    global _RESULT_WINDOW
+    global _RESULT_WINDOW, _RESULT_NUMBERS
 
     # Cache check
     cached = _CACHE.get(period)
@@ -199,19 +230,22 @@ def sddgamer263_predict(current_number: int, period: str) -> Dict[str, Any]:
     current_size = get_big_small(current_number)
     current_color = get_color(current_number)
 
-    # Rolling window update (max 10)
+    # Rolling window update (sizes)
     _RESULT_WINDOW.append(current_size)
     if len(_RESULT_WINDOW) > CONFIG["HISTORY_LIMIT"]:
         _RESULT_WINDOW = _RESULT_WINDOW[-CONFIG["HISTORY_LIMIT"]:]
 
+    # Full history update (numbers)
+    _RESULT_NUMBERS.append(int(current_number))
+    # Cap history to avoid unbounded growth (keep last 500)
+    if len(_RESULT_NUMBERS) > 500:
+        _RESULT_NUMBERS = _RESULT_NUMBERS[-500:]
+
     # Last 3 sizes
     last3 = _RESULT_WINDOW[-3:] if len(_RESULT_WINDOW) >= 3 else _RESULT_WINDOW[:]
-    # last3 numbers (sirf current number available hai, baaki synthetic nahi)
-    last3_numbers = [int(current_number)] * len(last3)
 
-    # Prediction
+    # Not enough data
     if len(last3) < 3:
-        # Not enough data
         result = {
             "predictedSize": "ANALYZING",
             "predictedNumber": int(current_number),
@@ -231,17 +265,20 @@ def sddgamer263_predict(current_number: int, period: str) -> Dict[str, Any]:
         _CACHE[period] = result
         return {k: v for k, v in result.items() if k != "_ts"}
 
-    pred_data = _build_prediction(last3, last3_numbers)
+    # BIG/SMALL prediction
+    pred_data = _build_prediction(last3)
 
-    # Confidence: zigzag me high, normal me medium
+    # Predicted NUMBER using new logic
+    predicted_number = _pick_predicted_number(pred_data["prediction"])
+
+    # Confidence
     if pred_data["mode"] == "ZIGZAG":
         confidence = 72
     else:
         big_c = last3.count("BIG")
         small_c = last3.count("SMALL")
         diff = abs(big_c - small_c)
-        confidence = 55 + diff * 8   # 3-0 -> 79, 2-1 -> 63
-
+        confidence = 55 + diff * 8
     confidence = max(42, min(77, confidence))
 
     # Risk
@@ -267,9 +304,13 @@ def sddgamer263_predict(current_number: int, period: str) -> Dict[str, Any]:
     total = STATE.win_count + STATE.loss_count
     win_rate = round(STATE.win_count / total * 100) if total > 0 else 0
 
+    # Missing info (for transparency)
+    missing = _get_missing_numbers(10)
+    missing_freq = {n: _get_frequency(n) for n in missing}
+
     result = {
         "predictedSize": pred_data["prediction"],
-        "predictedNumber": int(current_number),
+        "predictedNumber": predicted_number,
         "confidence": confidence,
         "reason": pred_data["reason"],
         "riskLevel": risk_level,
@@ -277,6 +318,8 @@ def sddgamer263_predict(current_number: int, period: str) -> Dict[str, Any]:
         "advice": advice,
         "mode": pred_data["mode"],
         "last3": "".join(last3),
+        "missingNumbers": missing,
+        "missingFreq": missing_freq,
         "winCount": STATE.win_count,
         "lossCount": STATE.loss_count,
         "winRate": win_rate,
@@ -303,9 +346,10 @@ def clear_engine_cache():
 
 
 def reset():
-    global _RESULT_WINDOW, _ZIGZAG_ACTIVE
+    global _RESULT_WINDOW, _RESULT_NUMBERS, _ZIGZAG_ACTIVE
     STATE.reset()
     _RESULT_WINDOW = []
+    _RESULT_NUMBERS = []
     _ZIGZAG_ACTIVE = False
 
 
@@ -315,10 +359,17 @@ def reset():
 if __name__ == "__main__":
     print("Testing prediction_engine.py ...")
     reset()
-    # Simulate: 7(BIG), 5(BIG), 2(SMALL) -> BIG zyada -> BIG
-    for num in [7, 5, 2, 8, 1, 9, 0, 6, 3, 4]:
-        out = sddgamer263_predict(num, f"P{num}")
-        print(f"  num={num} size={out['currentSize']} "
-              f"last3={out['last3']} mode={out['mode']} "
-              f"-> {out['predictedSize']} ({out['confidence']}%) "
-              f"| {out['reason']}")
+    # Simulate a sequence
+    test_nums = [7, 5, 2, 8, 1, 9, 0, 6, 3, 4, 7, 8, 2, 5, 9]
+    for i, num in enumerate(test_nums):
+        out = sddgamer263_predict(num, f"P{i}")
+        print(
+            f"  num={num} size={out['currentSize']:5s} "
+            f"last3={out.get('last3','---'):3s} "
+            f"mode={out['mode']:6s} "
+            f"-> {out['predictedSize']:6s} #{out['predictedNumber']} "
+            f"({out['confidence']}%)"
+        )
+        print(f"     reason: {out['reason']}")
+        if "missingNumbers" in out:
+            print(f"     missing: {out['missingNumbers']} freq: {out['missingFreq']}")
