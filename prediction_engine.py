@@ -1,13 +1,14 @@
 """
 CYBER TAMILAN — prediction_engine.py
 =====================================
-100% HTML <script> prediction logic port.
+Prediction logic:
+  1. Last 3 results me jo zyada ho (BIG/SMALL) wahi final prediction.
+  2. Zig-Zag detection (BSB / SBS) -> last result ka opposite.
+  3. Zig-Zag se normal switch jab BSS / SBB aaye.
 Exposes: sddgamer263_predict(current_number, period)
 """
 
 import time
-import math
-import random
 from datetime import datetime, timezone
 from typing import Dict, List, Any, Optional
 
@@ -17,25 +18,10 @@ import requests
 # ============================================================
 # CONSTANTS
 # ============================================================
-CURRENT_API = "https://api.bdg88zf.com/api/webapi/GetGameIssue"
-HISTORY_API = "https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json"
-
-REQUEST_DATA = {
-    "typeId": 1,
-    "language": 0,
-    "random": "e7fe6c090da2495ab8290dac551ef1ed",
-    "signature": "1F390E2B2D8A55D693E57FD905AE73A7",
-    "timestamp": 1723726679,
-}
-
 CONFIG = {
-    "HISTORY_LIMIT": 45,
-    "MIN_CONFIDENCE": 42,
-    "MAX_CONFIDENCE": 77,
-    "ANTI_LOSS_THRESHOLD": 3,
-    "POLL_INTERVAL": 7.5,
     "HTTP_TIMEOUT": 15,
     "CACHE_TTL": 50,
+    "HISTORY_LIMIT": 10,
 }
 
 HEADERS = {
@@ -53,36 +39,23 @@ HEADERS = {
 # HELPERS
 # ============================================================
 def get_big_small(n) -> str:
+    """0-4 = SMALL (RED), 5-9 = BIG (GREEN)"""
     try:
         return "BIG" if int(n) >= 5 else "SMALL"
     except (ValueError, TypeError):
         return "SMALL"
 
 
-def http_post_json(url: str, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def get_color(n) -> str:
+    """5-9 = GREEN, 0-4 = RED"""
     try:
-        resp = requests.post(
-            url, json=payload, headers=HEADERS, timeout=CONFIG["HTTP_TIMEOUT"]
-        )
-        if resp.status_code == 200:
-            return resp.json()
-        print(f"[POST {resp.status_code}] {url}")
-        return None
-    except Exception as e:
-        print(f"[POST ERROR] {url} -> {e}")
-        return None
+        return "GREEN" if int(n) >= 5 else "RED"
+    except (ValueError, TypeError):
+        return "RED"
 
 
-def http_get_json(url: str) -> Optional[Dict[str, Any]]:
-    try:
-        resp = requests.get(url, headers=HEADERS, timeout=CONFIG["HTTP_TIMEOUT"])
-        if resp.status_code == 200:
-            return resp.json()
-        print(f"[GET {resp.status_code}] {url}")
-        return None
-    except Exception as e:
-        print(f"[GET ERROR] {url} -> {e}")
-        return None
+def opposite(size: str) -> str:
+    return "SMALL" if size == "BIG" else "BIG"
 
 
 # ============================================================
@@ -91,13 +64,10 @@ def http_get_json(url: str) -> Optional[Dict[str, Any]]:
 class _State:
     def __init__(self):
         self.prediction_history: List[Dict[str, Any]] = []
-        self.last_200_results: List[Dict[str, Any]] = []
         self.win_count: int = 0
         self.loss_count: int = 0
         self.consecutive_losses: int = 0
-        self.current_period: str = "LOADING"
-        self.last_tick: Optional[str] = None
-        self.last_error: Optional[str] = None
+        self.last_mode: str = "NORMAL"   # NORMAL or ZIGZAG
 
     def reset(self):
         self.__init__()
@@ -106,293 +76,216 @@ class _State:
 STATE = _State()
 _CACHE: Dict[str, Dict[str, Any]] = {}
 
+# Last few results ka rolling window (sizes)
+_RESULT_WINDOW: List[str] = []
+# Zig-zag mode track karne ke liye
+_ZIGZAG_ACTIVE: bool = False
+
 
 # ============================================================
-# CORE ENGINE — 100% port of ultraPatternEngine()
+# CORE PREDICTION LOGIC
 # ============================================================
-def ultra_pattern_engine(history: List[Dict[str, Any]]) -> Dict[str, Any]:
-    if not history or len(history) < 8:
-        return {
-            "prediction": "ANALYZING",
-            "confidence": 30,
-            "patternPower": 25,
-            "streak": 0,
-            "volatility": 0.5,
-            "description": "Building matrix...",
-        }
+def _detect_zigzag(last3: List[str]) -> bool:
+    """
+    BSB ya SBS = zig-zag pattern.
+    last3 = [oldest, middle, newest]
+    """
+    if len(last3) < 3:
+        return False
+    return last3[0] == last3[2] and last3[0] != last3[1]
 
-    length = min(45, len(history))
-    recent = history[:length]
 
-    big = sum(1 for r in recent if r.get("size") == "BIG")
-    small = length - big
-    big_pct = big / length
-    small_pct = small / length
+def _zigzag_broken(last3: List[str]) -> bool:
+    """
+    Zig-zag tootne ka signal: BSS ya SBB (ya RSS/GBB type)
+    Matlab pehle 2 same, teesra different.
+    """
+    if len(last3) < 3:
+        return False
+    return last3[0] == last3[1] and last3[0] != last3[2]
 
-    streak = 1
-    limit = min(20, len(history))
-    for i in range(1, limit):
-        if history[i]["size"] == history[i - 1]["size"]:
-            streak += 1
-        else:
-            break
 
-    alt = 0
-    alt_limit = min(18, len(history))
-    for i in range(1, alt_limit):
-        if history[i]["size"] != history[i - 1]["size"]:
-            alt += 1
-    alt_ratio = alt / max(1, min(17, len(history) - 1))
+def _normal_prediction(last3: List[str], last3_numbers: List[int]) -> str:
+    """
+    Last 3 me jo zyada ho wahi prediction.
+    Color check bhi: agar 5/7 (GREEN) zyada -> opposite RED -> SMALL? 
+    Nahi, aapke hisaab se:
+      7/5/2 -> BIG zyada -> BIG prediction
+      Color 5/7 = GREEN -> opposite = RED -> matlab BIG (8/6)
+    Matlab BIG ka opposite SMALL nahi, balki BIG hi rahega kyunki
+    GREEN ka opposite RED hota hai jo SMALL hai... 
+    
+    Wait — aapne likha: "colour 5/7 matlab green to green ka opposite red 
+    to final prediction asa hoga BIG 8/6 number"
+    
+    Matlab: agar GREEN zyada hai to prediction BIG hi hoga (8/6).
+    Agar RED zyada hai to prediction SMALL hoga (2/4).
+    """
+    big_count = last3.count("BIG")
+    small_count = last3.count("SMALL")
 
-    ch = 0
-    vl = min(14, len(history) - 1)
-    for i in range(1, vl + 1):
-        if history[i]["size"] != history[i - 1]["size"]:
-            ch += 1
-    volatility = ch / (vl if vl else 1)
-
-    ms = 0
-    mom_limit = min(12, len(history))
-    for i in range(mom_limit):
-        ms += (1 if history[i]["size"] == "BIG" else -1) * (12 - i)
-    mb = ms / 78
-
-    prediction = ""
-    raw_conf = 50.0
-    pattern_power = 45.0
-    description = ""
-
-    if streak >= 4:
-        prediction = "SMALL" if history[0]["size"] == "BIG" else "BIG"
-        raw_conf = 58 + min(30, streak * 5.5)
-        pattern_power = 70 + (streak - 3) * 4
-        description = f"REVERSAL: {streak}-streak exhaustion -> mean reversion"
-
-    elif alt_ratio > 0.72 and length >= 10:
-        prediction = "SMALL" if history[0]["size"] == "BIG" else "BIG"
-        raw_conf = 62 + alt_ratio * 14
-        pattern_power = 68
-        description = f"ZIGZAG LOCK: {round(alt_ratio * 100)}% flip rate"
-
-    elif big_pct > 0.70:
-        prediction = "SMALL"
-        b = (big_pct - 0.5) * 2.2
-        raw_conf = 56 + min(22, b * 32)
-        pattern_power = 60 + b * 25
-        description = f"HEAVY BIG BIAS {round(big_pct * 100)}% -> SMALL"
-
-    elif small_pct > 0.70:
-        prediction = "BIG"
-        b = (small_pct - 0.5) * 2.2
-        raw_conf = 56 + min(22, b * 32)
-        pattern_power = 60 + b * 25
-        description = f"HEAVY SMALL BIAS {round(small_pct * 100)}% -> BIG"
-
+    if big_count > small_count:
+        return "BIG"
+    elif small_count > big_count:
+        return "SMALL"
     else:
-        if mb > 0.15:
-            prediction = "BIG"
-        elif mb < -0.15:
-            prediction = "SMALL"
-        else:
-            prediction = "BIG" if big_pct > small_pct else "SMALL"
-        e = abs(big_pct - 0.5) * 100
-        raw_conf = 52 + min(18, e * 0.7)
-        pattern_power = 52 + e * 0.6
-        description = f"TREND FOLLOW: {prediction} favored"
+        # Tie: last result ka opposite (safe fallback)
+        return opposite(last3[-1])
 
-    if STATE.consecutive_losses >= CONFIG["ANTI_LOSS_THRESHOLD"]:
-        old = prediction
-        prediction = "SMALL" if prediction == "BIG" else "BIG"
-        description = (
-            f"ANTI-LOSS: {old} -> {prediction} after "
-            f"{STATE.consecutive_losses}L"
+
+def _build_prediction(last3: List[str], last3_numbers: List[int]) -> Dict[str, Any]:
+    """
+    Main decision function:
+      - Zig-zag detect karo
+      - Zig-zag active hai to last ka opposite
+      - Zig-zag toota to normal pe switch
+      - Warna normal: last 3 me jo zyada
+    """
+    global _ZIGZAG_ACTIVE
+
+    reason = ""
+    mode = "NORMAL"
+
+    # --- Zig-Zag check ---
+    if _detect_zigzag(last3):
+        _ZIGZAG_ACTIVE = True
+        mode = "ZIGZAG"
+        pred = opposite(last3[-1])
+        reason = (
+            f"ZIGZAG detected ({''.join(last3)}) -> "
+            f"opposite of last ({last3[-1]}) = {pred}"
         )
-        raw_conf = min(76, raw_conf + 8)
+        STATE.last_mode = "ZIGZAG"
+        return {"prediction": pred, "mode": mode, "reason": reason}
 
-    raw_conf = max(45, min(76, raw_conf - min(24, volatility * 45)))
+    # --- Zig-Zag broken? ---
+    if _ZIGZAG_ACTIVE and _zigzag_broken(last3):
+        _ZIGZAG_ACTIVE = False
+        mode = "NORMAL"
+        reason = f"ZIGZAG broken ({''.join(last3)}) -> switching to NORMAL"
 
-    return {
-        "prediction": prediction,
-        "confidence": int(min(77, max(42, raw_conf))),
-        "patternPower": int(min(84, pattern_power)),
-        "streak": streak,
-        "volatility": round(volatility, 2),
-        "description": description,
-        "altRatio": alt_ratio,
-    }
+    # --- Normal prediction ---
+    if not _ZIGZAG_ACTIVE:
+        pred = _normal_prediction(last3, last3_numbers)
+        if not reason:
+            big_c = last3.count("BIG")
+            small_c = last3.count("SMALL")
+            reason = (
+                f"NORMAL: last3={''.join(last3)} "
+                f"(BIG={big_c}, SMALL={small_c}) -> {pred}"
+            )
+        mode = "NORMAL"
+        STATE.last_mode = "NORMAL"
 
-
-# ============================================================
-# RISK ENGINE
-# ============================================================
-def assess_risk(engine: Dict[str, Any]) -> Dict[str, Any]:
-    s = 0
-    streak = engine.get("streak", 0)
-    if streak >= 5:
-        s += 40
-    elif streak >= 3:
-        s += 22
-
-    confidence = engine.get("confidence", 50)
-    if confidence < 50:
-        s += 28
-    elif confidence < 58:
-        s += 14
-    elif confidence > 66:
-        s -= 8
-
-    if engine.get("altRatio", 0) > 0.7:
-        s -= 14
-
-    s += math.floor(engine.get("volatility", 0.5) * 48)
-    s = min(98, max(5, s))
-
-    if s < 30:
-        level, cls = "LOW", "text-green-600"
-    elif s < 60:
-        level, cls = "MEDIUM", "text-yellow-600"
-    else:
-        level, cls = "HIGH", "text-red-600"
-
-    return {"level": level, "cls": cls, "score": s}
+    return {"prediction": pred, "mode": mode, "reason": reason}
 
 
 # ============================================================
-# ADVICE ENGINE
-# ============================================================
-def get_smart_advice(risk: Dict[str, Any], engine: Dict[str, Any]) -> str:
-    if STATE.consecutive_losses >= CONFIG["ANTI_LOSS_THRESHOLD"]:
-        return (
-            f"ANTI-LOSS ACTIVE: {STATE.consecutive_losses} losses. "
-            "Prediction reversed."
-        )
-
-    if risk["level"] == "HIGH":
-        if engine.get("streak", 0) >= 4:
-            return "HIGH RISK + reversal zone: Skip this round."
-        return "HIGH RISK: Wait 1-2 rounds."
-
-    if risk["level"] == "MEDIUM":
-        if engine.get("confidence", 0) >= 58:
-            return "MEDIUM RISK + decent confidence: Moderate stake."
-        return "MEDIUM RISK: Small stake only."
-
-    if engine.get("confidence", 0) >= 64:
-        return "LOW RISK: Strong alignment. Stay disciplined."
-    return "LOW RISK: Good setup. Follow plan."
-
-
-# ============================================================
-# SETTLE
-# ============================================================
-def settle(prediction: str, actual: str) -> Dict[str, Any]:
-    if prediction == actual:
-        STATE.win_count += 1
-        STATE.consecutive_losses = 0
-        return {"win": True, "status": "WIN"}
-    else:
-        STATE.loss_count += 1
-        STATE.consecutive_losses += 1
-        return {"win": False, "status": "LOSS"}
-
-
-# ============================================================
-# LIVE FETCHERS
-# ============================================================
-def fetch_current_period() -> str:
-    payload = dict(REQUEST_DATA)
-    payload["timestamp"] = int(time.time())
-    data = http_post_json(CURRENT_API, payload)
-    if not data:
-        return "LOADING"
-    try:
-        return str(data.get("data", {}).get("issueNumber", "LOADING"))
-    except Exception:
-        return "LOADING"
-
-
-def fetch_history() -> List[Dict[str, Any]]:
-    url = f"{HISTORY_API}?ts={int(time.time() * 1000)}"
-    data = http_get_json(url)
-    if not data:
-        return []
-    try:
-        raw = data.get("data", {}).get("list", [])
-        results = []
-        for it in raw[:200]:
-            try:
-                num = int(it.get("number"))
-            except (ValueError, TypeError):
-                continue
-            results.append({
-                "period": str(it.get("issueNumber")),
-                "number": num,
-                "size": get_big_small(num),
-            })
-        return results
-    except Exception as e:
-        print(f"[HISTORY PARSE ERROR] {e}")
-        return []
-
-
-# ============================================================
-# MAIN WRAPPER (ye app.py use karta hai)
+# MAIN WRAPPER
 # ============================================================
 def sddgamer263_predict(current_number: int, period: str) -> Dict[str, Any]:
     """
     app.py compatible wrapper.
-    Signature: sddgamer263_predict(current_number, period) -> dict
+    current_number: 0-9
+    period: issue number / period string
     """
+    global _RESULT_WINDOW
+
     # Cache check
     cached = _CACHE.get(period)
     if cached and (time.time() - cached.get("_ts", 0)) < CONFIG["CACHE_TTL"]:
         return {k: v for k, v in cached.items() if k != "_ts"}
 
-    # Build synthetic history (stable per period)
-    seed = int(abs(hash(period)) % 100000)
-    rng = random.Random(seed)
-
     current_size = get_big_small(current_number)
-    history = [{"period": period, "number": int(current_number), "size": current_size}]
-    for i in range(25):
-        n = rng.randint(0, 9)
-        history.append({
-            "period": f"{period}-{i}",
-            "number": n,
-            "size": get_big_small(n),
-        })
+    current_color = get_color(current_number)
 
-    engine = ultra_pattern_engine(history)
-    risk = assess_risk(engine)
-    advice = get_smart_advice(risk, engine)
+    # Rolling window update (max 10)
+    _RESULT_WINDOW.append(current_size)
+    if len(_RESULT_WINDOW) > CONFIG["HISTORY_LIMIT"]:
+        _RESULT_WINDOW = _RESULT_WINDOW[-CONFIG["HISTORY_LIMIT"]:]
+
+    # Last 3 sizes
+    last3 = _RESULT_WINDOW[-3:] if len(_RESULT_WINDOW) >= 3 else _RESULT_WINDOW[:]
+    # last3 numbers (sirf current number available hai, baaki synthetic nahi)
+    last3_numbers = [int(current_number)] * len(last3)
+
+    # Prediction
+    if len(last3) < 3:
+        # Not enough data
+        result = {
+            "predictedSize": "ANALYZING",
+            "predictedNumber": int(current_number),
+            "confidence": 40,
+            "reason": f"Building window... ({len(last3)}/3)",
+            "riskLevel": "MEDIUM",
+            "riskScore": 50,
+            "advice": "Wait for 3 results.",
+            "mode": "NORMAL",
+            "period": period,
+            "currentNumber": int(current_number),
+            "currentSize": current_size,
+            "currentColor": current_color,
+            "timestamp": datetime.now(timezone.utc).strftime("%I:%M %p"),
+            "_ts": time.time(),
+        }
+        _CACHE[period] = result
+        return {k: v for k, v in result.items() if k != "_ts"}
+
+    pred_data = _build_prediction(last3, last3_numbers)
+
+    # Confidence: zigzag me high, normal me medium
+    if pred_data["mode"] == "ZIGZAG":
+        confidence = 72
+    else:
+        big_c = last3.count("BIG")
+        small_c = last3.count("SMALL")
+        diff = abs(big_c - small_c)
+        confidence = 55 + diff * 8   # 3-0 -> 79, 2-1 -> 63
+
+    confidence = max(42, min(77, confidence))
+
+    # Risk
+    if pred_data["mode"] == "ZIGZAG":
+        risk_level, risk_score = "LOW", 28
+    elif confidence >= 70:
+        risk_level, risk_score = "LOW", 25
+    elif confidence >= 58:
+        risk_level, risk_score = "MEDIUM", 50
+    else:
+        risk_level, risk_score = "HIGH", 72
+
+    # Advice
+    if pred_data["mode"] == "ZIGZAG":
+        advice = "ZIGZAG active: play opposite of last result."
+    elif risk_level == "LOW":
+        advice = "LOW RISK: Strong setup. Follow plan."
+    elif risk_level == "MEDIUM":
+        advice = "MEDIUM RISK: Moderate stake."
+    else:
+        advice = "HIGH RISK: Small stake or skip."
 
     total = STATE.win_count + STATE.loss_count
     win_rate = round(STATE.win_count / total * 100) if total > 0 else 0
 
     result = {
-        # primary fields (app.py inhe use karta hai)
-        "predictedSize": engine["prediction"],
+        "predictedSize": pred_data["prediction"],
         "predictedNumber": int(current_number),
-        "confidence": engine["confidence"],
-        "reason": engine["description"],
-        "riskLevel": risk["level"],
-        "riskScore": risk["score"],
+        "confidence": confidence,
+        "reason": pred_data["reason"],
+        "riskLevel": risk_level,
+        "riskScore": risk_score,
         "advice": advice,
-
-        # extras
-        "patternPower": engine["patternPower"],
-        "streak": engine["streak"],
-        "volatility": engine["volatility"],
+        "mode": pred_data["mode"],
+        "last3": "".join(last3),
         "winCount": STATE.win_count,
         "lossCount": STATE.loss_count,
         "winRate": win_rate,
         "consecutiveLosses": STATE.consecutive_losses,
-        "antiLossActive": STATE.consecutive_losses >= CONFIG["ANTI_LOSS_THRESHOLD"],
         "period": period,
         "currentNumber": int(current_number),
         "currentSize": current_size,
+        "currentColor": current_color,
         "timestamp": datetime.now(timezone.utc).strftime("%I:%M %p"),
-        "mode": "1M",
         "_ts": time.time(),
     }
 
@@ -410,7 +303,10 @@ def clear_engine_cache():
 
 
 def reset():
+    global _RESULT_WINDOW, _ZIGZAG_ACTIVE
     STATE.reset()
+    _RESULT_WINDOW = []
+    _ZIGZAG_ACTIVE = False
 
 
 # ============================================================
@@ -418,6 +314,11 @@ def reset():
 # ============================================================
 if __name__ == "__main__":
     print("Testing prediction_engine.py ...")
-    out = sddgamer263_predict(7, "20250101100051234")
-    for k, v in out.items():
-        print(f"  {k}: {v}")
+    reset()
+    # Simulate: 7(BIG), 5(BIG), 2(SMALL) -> BIG zyada -> BIG
+    for num in [7, 5, 2, 8, 1, 9, 0, 6, 3, 4]:
+        out = sddgamer263_predict(num, f"P{num}")
+        print(f"  num={num} size={out['currentSize']} "
+              f"last3={out['last3']} mode={out['mode']} "
+              f"-> {out['predictedSize']} ({out['confidence']}%) "
+              f"| {out['reason']}")
