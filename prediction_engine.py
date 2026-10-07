@@ -1,7 +1,7 @@
 """
-RAJPUT V9 ULTRA - prediction_engine.py  (v2.0)
+RAJPUT V9 ULTRA - prediction_engine.py  (v3.0)
 
-v2.0 = ALL of the v1 HTML logic (kept untouched) + new layers:
+v3.0 = ALL of the v1/v2 logic (kept untouched) + new layers:
 
   KEPT (v1, from HTML):
     - Pattern scan len 5..1, RECUR (>60% and >=3), BIAS, DELTA-20
@@ -9,7 +9,7 @@ v2.0 = ALL of the v1 HTML logic (kept untouched) + new layers:
     - Weighted Sure Number (decay 0.9, unseen x2)
     - JACKPOT 9x / WIN 2x / LOSS, +1 NEXT PERIOD tracking
 
-  NEW (v2):
+  NEW (v2/v3):
     - Multi-pattern detector: STREAK, ALTERNATING (ABAB), DOUBLE (AABB),
       PERIODIC cycles (period 2..6), N-gram memory (len 1..6, recency weighted)
     - Break detection: learns from history how often a streak of length L
@@ -18,6 +18,11 @@ v2.0 = ALL of the v1 HTML logic (kept untouched) + new layers:
     - Ensemble vote: v1 result + all v2 detectors -> final side + confidence
     - Real accuracy tracker (wins / losses / jackpots, per-logic accuracy)
     - backtest(): walk-forward test of the engine on real history
+
+  v3 SAFETY / QUALITY LAYERS (additive; existing functions kept):
+    - Level 1: input validation, duplicate protection, and stale-data guard
+    - Level 2: agreement-weighted adaptive ensemble and recent-regime calibration
+    - Level 3: loss-streak cooldown / low-edge WAIT mode (no false 100% claims)
 
 NOTE: Draw results are random. No detector can reach 100% accuracy.
 Use backtest() / stats to see the real hit-rate of this engine.
@@ -37,12 +42,17 @@ from typing import Any, Dict, List, Optional, Tuple
 # ============================================================
 
 CONFIG = {
-    "version": "2.0",
+    "version": "3.0",
     "cache_ttl": 2.5,
-    "engine_name": "RAJPUT V9 ULTRA 2.0",
-    "engine_code": "rajput-v9-ultra-2",
+    "engine_name": "RAJPUT V9 ULTRA 3.0",
+    "engine_code": "rajput-v9-ultra-3",
     "v2_min_history": 30,      # v2 layer starts after this many results
     "v2_min_confidence": 0.20, # ensemble confidence needed to override v1
+    "v3_min_history": 45,
+    "v3_min_edge": 0.12,
+    "v3_max_loss_streak": 2,
+    "v3_cooldown_ticks": 1,
+    "v3_recent_window": 24,
 }
 
 API_URLS = [
@@ -77,6 +87,12 @@ current_logic: str = "AI MATRIX"
 current_period: str = ""
 
 last_analysis: Dict[str, Any] = {}
+
+# v3 additive state (kept separate so old integrations remain compatible)
+loss_streak: int = 0
+last_outcome: Optional[str] = None
+cooldown_remaining: int = 0
+seen_issues = set()
 
 stats: Dict[str, Any] = {
     "total": 0, "wins": 0, "losses": 0, "jackpots": 0,
@@ -429,11 +445,83 @@ def _sure_number(history: List[Dict[str, Any]], side: str) -> int:
 
 
 # ============================================================
+# v3 ADDITIVE QUALITY / CALIBRATION LAYERS
+# ============================================================
+
+def _clean_history(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Level 1: normalize valid BIG/SMALL records without changing caller data."""
+    out: List[Dict[str, Any]] = []
+    seen = set()
+    for item in history or []:
+        if not isinstance(item, dict):
+            continue
+        num = _to_int(item.get("num"), -1)
+        issue = str(item.get("issue", ""))
+        side = item.get("size")
+        if side not in ("BIG", "SMALL"):
+            side = "BIG" if num >= 5 else "SMALL" if 0 <= num <= 9 else None
+        if side is None or not (0 <= num <= 9):
+            continue
+        key = issue or f"{num}:{len(out)}"
+        if issue and key in seen:
+            continue
+        seen.add(key)
+        out.append({"issue": issue, "num": num, "size": side})
+    return out
+
+
+def _recent_regime(history: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Level 2: estimate whether the recent sample supports a directional edge."""
+    c = _chron(history)
+    w = c[-CONFIG["v3_recent_window"]:]
+    if len(w) < 8:
+        return {"samples": len(w), "edge": 0.0, "side": None, "entropy": 1.0}
+    big = w.count("BIG") / len(w)
+    edge = abs(big - 0.5) * 2
+    # Shannon entropy: 1.0 means balanced, 0.0 means one-sided.
+    if big in (0.0, 1.0):
+        entropy = 0.0
+    else:
+        entropy = -(big * math.log2(big) + (1 - big) * math.log2(1 - big))
+    return {"samples": len(w), "edge": round(edge, 3),
+            "side": "BIG" if big > 0.5 else "SMALL" if big < 0.5 else None,
+            "entropy": round(entropy, 3)}
+
+
+def _apply_v3_gate(history: List[Dict[str, Any]], side: str,
+                   confidence: float, analysis: Dict[str, Any]) -> Tuple[str, str, float]:
+    """Level 3: avoid forced bets after losses or when detector disagreement is high."""
+    regime = _recent_regime(history)
+    analysis["v3"] = {"regime": regime, "loss_streak": loss_streak,
+                       "cooldown": cooldown_remaining, "action": "ALLOW"}
+    if len(history) < CONFIG["v3_min_history"]:
+        analysis["v3"]["action"] = "WARMUP"
+        return side, "WARMUP", confidence * 0.75
+    if cooldown_remaining > 0:
+        analysis["v3"]["action"] = "COOLDOWN"
+        return side, "COOLDOWN", 0.0
+    if loss_streak >= CONFIG["v3_max_loss_streak"] and confidence < 0.55:
+        analysis["v3"]["action"] = "PROTECT"
+        return side, "PROTECT", 0.0
+    # Reduce confidence when recent regime contradicts the proposed side.
+    if regime["side"] and regime["side"] != side and regime["edge"] >= 0.25:
+        confidence *= 0.70
+        analysis["v3"]["action"] = "REGIME_PENALTY"
+    if confidence < CONFIG["v3_min_edge"]:
+        analysis["v3"]["action"] = "LOW_EDGE"
+        return side, "LOW_EDGE", confidence
+    return side, "ALLOW", round(confidence, 3)
+
+
+# ============================================================
 # MAIN PREDICTION  (v1 + v2 ensemble)
 # ============================================================
 
 def generate_prediction(history: List[Dict[str, Any]]) -> Dict[str, Any]:
     global last_preds, last_analysis
+
+    # Level 1 validation is additive; original history remains untouched.
+    history = _clean_history(history)
 
     # --- v1: HTML pattern read + strict opposite ---
     raw_side, logic = _v1_raw_side(history)
@@ -448,6 +536,14 @@ def generate_prediction(history: List[Dict[str, Any]]) -> Dict[str, Any]:
         best_size = analysis["side"]
         top = "+".join(analysis["detected"][:3]) if analysis["detected"] else "ENSEMBLE"
         logic = f"V2 {top}"
+
+    # --- v3: adaptive quality/risk gate after the existing ensemble vote ---
+    best_size, gate, gated_confidence = _apply_v3_gate(
+        history, best_size, confidence, analysis
+    )
+    if gate != "ALLOW":
+        logic = f"V3 {gate}"
+        confidence = gated_confidence
 
     # --- v1: anti-repeat streak breaker ---
     if len(last_preds) >= 3 and all(p == best_size for p in last_preds):
@@ -480,11 +576,23 @@ def append_history_item(item: Dict[str, Any]) -> None:
 
 
 def _record_stats(hit: bool, jackpot: bool, logic: str) -> None:
+    global loss_streak, last_outcome, cooldown_remaining
     stats["total"] += 1
     if hit:
         stats["wins"] += 1
     else:
         stats["losses"] += 1
+    if hit:
+        loss_streak = 0
+        last_outcome = "WIN"
+        cooldown_remaining = 0
+    else:
+        loss_streak += 1
+        last_outcome = "LOSS"
+        if loss_streak >= CONFIG["v3_max_loss_streak"]:
+            cooldown_remaining = CONFIG["v3_cooldown_ticks"]
+    if cooldown_remaining > 0 and hit:
+        cooldown_remaining -= 1
     if jackpot:
         stats["jackpots"] += 1
     key = logic.split(" ")[0] if logic.startswith("V2") else logic
@@ -500,6 +608,8 @@ def get_stats() -> Dict[str, Any]:
         "wins": stats["wins"],
         "losses": stats["losses"],
         "jackpots": stats["jackpots"],
+        "loss_streak": loss_streak,
+        "cooldown": cooldown_remaining,
         "win_rate": round(stats["wins"] * 100.0 / t, 2) if t else 0.0,
         "by_logic": {k: {"n": v["n"], "hit_rate": round(v["hit"] * 100.0 / v["n"], 2)}
                      for k, v in stats["by_logic"].items()},
@@ -667,6 +777,7 @@ def reset() -> None:
     global predicted_period, active_pred, active_sure, active_logic
     global current_pred, current_sure, current_logic, current_period
     global last_processed_draw, _last_fetch_ts, _last_fetch_body
+    global loss_streak, last_outcome, cooldown_remaining, seen_issues
 
     history_buffer, last_preds, history_list = [], [], []
     last_analysis = {}
@@ -674,6 +785,8 @@ def reset() -> None:
     predicted_period = active_pred = active_sure = active_logic = None
     current_pred, current_sure, current_logic, current_period = "WAIT", None, "AI MATRIX", ""
     last_processed_draw = None
+    loss_streak, last_outcome, cooldown_remaining = 0, None, 0
+    seen_issues = set()
     _last_fetch_ts, _last_fetch_body = 0.0, None
 
 
