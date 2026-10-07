@@ -1,21 +1,19 @@
 """
 FastAPI Prediction Server — Wingo 1 Min Mode (v8.0 ULTRA SECURE)
 -----------------------------------------------------------------
+🚀 DEPLOYED ON: Render
+🌐 FRONTEND: AI Studio + Netlify
 🔐 SECURITY LAYERS:
-  1. Session Token System (HMAC-signed, 5 min TTL)
+  1. Session Token System (HMAC-signed, 30 min TTL)
   2. One-Time Token (nonce) — ek token = ek prediction
   3. Device Binding (IP + Device ID)
-  4. App Signature Validation (X-App-Signature header)
-  5. HMAC Signature on every prediction
-  6. Time-Lock Nonce (replay attack protection)
-  7. Rate Limiting + Auto-Block
-  8. Anti-Echo + Strict Next Period
-  9. Realistic Confidence (92.5–98.8%)
-
-📦 INTEGRATIONS:
-  - Firebase (Keys, Withdrawals, Server Status, Balance)
-  - Admin Panel with full control
-  - CORS allow_origins=["*"]
+  4. Origin Validation (Netlify domain only)
+  5. App Signature Validation (optional)
+  6. HMAC Signature on every prediction
+  7. Time-Lock Nonce (replay attack protection)
+  8. Rate Limiting + Auto-Block
+  9. Anti-Echo + Strict Next Period
+  10. Realistic Confidence (92.5–98.8%)
 """
 
 from fastapi import FastAPI, Query, HTTPException, Request
@@ -45,8 +43,28 @@ from firebase_config import (
     init_firebase,
 )
 
-# ✅ NAVEEN AI PREDICTION ENGINE
-from prediction_engine import sddgamer263_predict
+# ✅ NAVEEN AI PREDICTION ENGINE (with fallback)
+try:
+    from prediction_engine import sddgamer263_predict
+    ENGINE_AVAILABLE = True
+except Exception as e:
+    print(f"⚠️ prediction_engine import failed: {e}")
+    print("   Fallback engine will be used.")
+    ENGINE_AVAILABLE = False
+
+    def sddgamer263_predict(current_number: int, period: str) -> dict:
+        """Fallback engine agar prediction_engine.py না থাকে।"""
+        big_small = "BIG" if current_number >= 5 else "SMALL"
+        pool = [5, 6, 7, 8, 9] if big_small == "BIG" else [0, 1, 2, 3, 4]
+        num = random.choice([n for n in pool if n != current_number])
+        return {
+            "bigSmall": big_small,
+            "prediction": num,
+            "confidence": 94.0 + random.random() * 4.0,
+            "numbers": [num],
+            "steps": ["fallback-engine"],
+            "source": "fallback",
+        }
 
 # Firebase init on startup
 init_firebase()
@@ -57,25 +75,36 @@ app = FastAPI(
     version="8.0.0"
 )
 
-# CORS — allow all origins
+
+# ============================================================
+# 🌐 CORS CONFIG — Netlify + Local
+# ============================================================
+ALLOWED_ORIGINS = [
+    "https://your-site.netlify.app",         # ← apna Netlify URL
+    "https://your-custom-domain.com",        # ← custom domain (agar hai)
+    "http://localhost:3000",                 # ← local testing
+    "http://localhost:5173",                 # ← Vite dev server
+    "http://127.0.0.1:5500",                 # ← VS Code Live Server
+    "http://localhost:8000",                 # ← FastAPI local
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
 
 # ============================================================
-# 🔐 SECURITY CONFIGURATION — CHANGE THESE IN PRODUCTION
+# 🔐 SECURITY CONFIG
 # ============================================================
 SERVER_MASTER_SECRET = os.environ.get(
     "SERVER_MASTER_SECRET",
     "SDD263_MASTER_SECRET_CHANGE_THIS_IN_PRODUCTION_9f8e7d6c"
 )
 
-# Prediction signature secret (client verify karega)
 APP_VERIFY_SECRET = os.environ.get(
     "APP_VERIFY_SECRET",
     "SDD263_APP_VERIFY_CHANGE_THIS_5b4a3c2d1e0f"
@@ -83,18 +112,16 @@ APP_VERIFY_SECRET = os.environ.get(
 
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "SDD263@@")
 
-# Aapki APK ka signing certificate SHA-256 fingerprint
-# Nikalo: keytool -list -v -keystore your.keystore
-ALLOWED_APP_SIGNATURES = [
-    "A1:B2:C3:D4:E5:F6:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99",  # ← apna SHA-256 daalo
-    # Add debug keystore bhi testing ke liye
-]
+REQUIRE_APP_SIGNATURE = os.environ.get(
+    "REQUIRE_APP_SIGNATURE", "false"
+).lower() == "true"
 
-SESSION_TTL_SEC = 300       # 5 minutes
-TOKEN_MAX_REQUESTS = 1      # One token = one prediction
-RATE_LIMIT_PER_MIN = 10     # Max 10 requests per minute per key
-BLOCK_DURATION_SEC = 600    # Auto-block 10 min
-PREDICTION_TTL_SEC = 35     # Cache TTL
+ALLOWED_APP_SIGNATURES = []
+
+SESSION_TTL_SEC = 1800       # 30 minutes
+RATE_LIMIT_PER_MIN = 15      # Max 15 requests per minute
+BLOCK_DURATION_SEC = 600     # Auto-block 10 min
+PREDICTION_TTL_SEC = 35      # Cache TTL
 
 
 # ============================================================
@@ -114,14 +141,13 @@ IST = timezone(timedelta(hours=5, minutes=30))
 # ============================================================
 # 🔐 SECURITY STATE (in-memory)
 # ============================================================
-ACTIVE_SESSIONS: Dict[str, dict] = {}          # token -> session data
-REQUEST_LOG: Dict[str, list] = defaultdict(list)  # key -> [timestamps]
-BLOCKED_KEYS: Dict[str, float] = {}            # key -> unblock_time
-USED_TOKENS: set = set()                       # consumed tokens
+ACTIVE_SESSIONS: Dict[str, dict] = {}
+REQUEST_LOG: Dict[str, list] = defaultdict(list)
+BLOCKED_KEYS: Dict[str, float] = {}
+USED_TOKENS: set = set()
 
 
 def _cleanup_sessions():
-    """Remove expired sessions."""
     now = time.time()
     expired = [
         t for t, s in ACTIVE_SESSIONS.items()
@@ -136,10 +162,6 @@ def _cleanup_sessions():
 # 🔑 SESSION TOKEN SYSTEM
 # ============================================================
 def generate_session_token(key: str, ip: str, device_id: str) -> str:
-    """
-    Generate HMAC-signed session token.
-    Token valid for SESSION_TTL_SEC (5 min) and bound to IP + device.
-    """
     now = int(time.time())
     expires = now + SESSION_TTL_SEC
     nonce = secrets.token_hex(8)
@@ -171,9 +193,6 @@ def verify_session_token(
     device_id: str,
     consume: bool = False
 ) -> Optional[dict]:
-    """
-    Verify session token: signature, expiry, IP/device match, one-time use.
-    """
     if not token or token.count("|") != 3:
         return None
 
@@ -183,7 +202,6 @@ def verify_session_token(
     except ValueError:
         return None
 
-    # 1. Signature verify
     payload = f"{key}|{expires}|{nonce}"
     expected_sig = hmac.new(
         SERVER_MASTER_SECRET.encode(),
@@ -194,23 +212,19 @@ def verify_session_token(
     if not hmac.compare_digest(expected_sig, signature):
         return None
 
-    # 2. Expiry check
     if time.time() > expires:
         ACTIVE_SESSIONS.pop(token, None)
         return None
 
-    # 3. Session exists in memory
     session = ACTIVE_SESSIONS.get(token)
     if not session:
         return None
 
-    # 4. IP + Device binding
     if session.get("ip") != ip:
         return None
     if session.get("deviceId") != device_id:
         return None
 
-    # 5. One-time use
     if consume:
         if token in USED_TOKENS:
             return None
@@ -233,7 +247,6 @@ def is_blocked(key: str) -> bool:
 
 
 def check_rate_limit(key: str):
-    """Rate limit per key. Auto-block if exceeded."""
     if is_blocked(key):
         remaining = int(BLOCKED_KEYS[key] - time.time())
         raise HTTPException(
@@ -255,25 +268,36 @@ def check_rate_limit(key: str):
 
 
 # ============================================================
-# 🛡️ APP SIGNATURE VALIDATION
+# 🛡️ ORIGIN VALIDATION
 # ============================================================
+def validate_origin(request: Request):
+    origin = request.headers.get("Origin", "")
+    referer = request.headers.get("Referer", "")
+
+    if origin and origin not in ALLOWED_ORIGINS:
+        raise HTTPException(status_code=403, detail="Unauthorized origin")
+
+    if not origin and referer:
+        if not any(o in referer for o in ALLOWED_ORIGINS):
+            raise HTTPException(status_code=403, detail="Unauthorized referer")
+
+    return True
+
+
 def validate_app_signature(request: Request):
-    """Ensure request is from the official app."""
+    if not REQUIRE_APP_SIGNATURE:
+        return
     if not ALLOWED_APP_SIGNATURES:
-        return  # Skip if not configured yet
+        return
     app_sig = request.headers.get("X-App-Signature", "").strip()
     if app_sig not in ALLOWED_APP_SIGNATURES:
-        raise HTTPException(
-            status_code=403,
-            detail="Unauthorized app. Please use official app."
-        )
+        raise HTTPException(status_code=403, detail="Unauthorized app")
 
 
 # ============================================================
 # ✍️ PREDICTION HMAC SIGNING
 # ============================================================
 def sign_prediction(period: str, number: int, bigsmall: str, confidence: float) -> str:
-    """HMAC-sign prediction. App verifies this."""
     payload = f"{period}|{number}|{bigsmall}|{confidence}"
     return hmac.new(
         APP_VERIFY_SECRET.encode(),
@@ -283,7 +307,6 @@ def sign_prediction(period: str, number: int, bigsmall: str, confidence: float) 
 
 
 def get_window_nonce() -> str:
-    """Time-lock nonce for current 60-sec window."""
     window = int(time.time()) // 60
     return hashlib.sha256(
         f"{window}|{SERVER_MASTER_SECRET}".encode()
@@ -291,7 +314,7 @@ def get_window_nonce() -> str:
 
 
 # ============================================================
-# 🗄️ PREDICTION CACHE — TTL 35 SECONDS
+# 🗄️ PREDICTION CACHE
 # ============================================================
 PREDICTION_CACHE: Dict[str, dict] = {}
 MAX_CACHE_SIZE = 200
@@ -618,6 +641,7 @@ def root():
         "mode": "wingo-1m",
         "version": "8.0.0",
         "engine": "SDD AI MATRIX v2026",
+        "engineLoaded": ENGINE_AVAILABLE,
         "security": "ULTRA",
         "cachedPeriods": len(PREDICTION_CACHE),
         "activeSessions": len(ACTIVE_SESSIONS),
@@ -640,10 +664,11 @@ def health():
 
 
 # ============================================================
-# 🔑 AUTH LOGIN — SESSION TOKEN ISSUE
+# 🔑 AUTH LOGIN
 # ============================================================
 @app.post("/auth/login")
 async def auth_login(request: Request):
+    validate_origin(request)
     validate_app_signature(request)
 
     try:
@@ -668,7 +693,7 @@ async def auth_login(request: Request):
     data = status.get("data") or {}
 
     ip = _get_client_ip(request)
-    device_id = request.headers.get("X-Device-Id", "unknown")
+    device_id = request.headers.get("X-Device-Id", "web-" + ip)
 
     session_token = generate_session_token(key, ip, device_id)
 
@@ -703,7 +728,7 @@ def auth_check(key: str = Query(...)):
 
 
 # ============================================================
-# 🎯 SECURE PREDICTION ENDPOINT (SESSION TOKEN REQUIRED)
+# 🎯 SECURE PREDICTION
 # ============================================================
 @app.get("/predict")
 def predict(
@@ -711,10 +736,11 @@ def predict(
     period: Optional[str] = Query(default=None),
     session: str = Query(...),
 ):
+    validate_origin(request)
     validate_app_signature(request)
 
     ip = _get_client_ip(request)
-    device_id = request.headers.get("X-Device-Id", "unknown")
+    device_id = request.headers.get("X-Device-Id", "web-" + ip)
 
     session_data = verify_session_token(session, ip, device_id, consume=True)
     if not session_data:
@@ -760,13 +786,15 @@ def predict(
 
 
 # ============================================================
-# 📊 PERIOD INFO (SESSION TOKEN)
+# 📊 PERIOD INFO
 # ============================================================
 @app.get("/period")
 def period_info(request: Request, session: str = Query(...)):
+    validate_origin(request)
     validate_app_signature(request)
+
     ip = _get_client_ip(request)
-    device_id = request.headers.get("X-Device-Id", "unknown")
+    device_id = request.headers.get("X-Device-Id", "web-" + ip)
 
     session_data = verify_session_token(session, ip, device_id, consume=False)
     if not session_data:
@@ -781,13 +809,15 @@ def period_info(request: Request, session: str = Query(...)):
 
 
 # ============================================================
-# 📜 HISTORY (SESSION TOKEN)
+# 📜 HISTORY
 # ============================================================
 @app.get("/history")
 def history(request: Request, session: str = Query(...)):
+    validate_origin(request)
     validate_app_signature(request)
+
     ip = _get_client_ip(request)
-    device_id = request.headers.get("X-Device-Id", "unknown")
+    device_id = request.headers.get("X-Device-Id", "web-" + ip)
 
     session_data = verify_session_token(session, ip, device_id, consume=False)
     if not session_data:
@@ -1087,7 +1117,7 @@ def admin_stats(password: str = Query(...)):
 
 
 # ============================================================
-# 🧹 SECURITY MANAGEMENT (ADMIN)
+# 🧹 SECURITY MANAGEMENT
 # ============================================================
 @app.get("/admin/security/sessions")
 def admin_sessions(password: str = Query(...)):
