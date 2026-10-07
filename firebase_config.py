@@ -1,10 +1,11 @@
 """
 Firebase Configuration & Helper Functions
 ------------------------------------------
-- Firebase Admin SDK initialize
+- Firebase Admin SDK initialize (Render + Local support)
 - Realtime Database se key check
 - Server status check
 - Withdrawal requests
+- REST API fallback agar Admin SDK fail ho
 """
 
 import firebase_admin
@@ -12,6 +13,7 @@ from firebase_admin import credentials
 import os
 import json
 import time
+import base64
 import urllib.request
 import urllib.error
 
@@ -30,42 +32,91 @@ FIREBASE_WEB_CONFIG = {
     "measurementId": "G-63BFTWW8HP"
 }
 
-DATABASE_URL = FIREBASE_WEB_CONFIG["databaseURL"]
+DATABASE_URL = os.environ.get(
+    "FIREBASE_DB_URL",
+    FIREBASE_WEB_CONFIG["databaseURL"]
+)
 
 
 # ============================================================
-# 🔥 FIREBASE ADMIN SDK INIT
+# 🔥 FIREBASE ADMIN SDK INIT (Render + Local)
 # ============================================================
 _firebase_initialized = False
 
 
-def init_firebase():
+def _load_service_account() -> dict:
+    """
+    Service account credentials 3 tarike se load karo:
+    1. FIREBASE_SERVICE_ACCOUNT_B64 env var (base64 JSON) — Render ke liye best
+    2. FIREBASE_SERVICE_ACCOUNT env var (plain JSON)
+    3. serviceAccountKey.json file (local development)
+    """
+    # Priority 1: Base64 encoded (Render mein safe)
+    b64 = os.environ.get("FIREBASE_SERVICE_ACCOUNT_B64")
+    if b64:
+        try:
+            decoded = base64.b64decode(b64).decode("utf-8")
+            return json.loads(decoded)
+        except Exception as e:
+            print(f"⚠️ FIREBASE_SERVICE_ACCOUNT_B64 decode error: {e}")
+
+    # Priority 2: Plain JSON env var
+    plain = os.environ.get("FIREBASE_SERVICE_ACCOUNT")
+    if plain:
+        try:
+            return json.loads(plain)
+        except Exception as e:
+            print(f"⚠️ FIREBASE_SERVICE_ACCOUNT parse error: {e}")
+
+    # Priority 3: Local file
+    for path in [
+        "serviceAccountKey.json",
+        os.path.join(os.path.dirname(__file__), "serviceAccountKey.json"),
+        "/etc/secrets/serviceAccountKey.json",  # Render Secret Files
+    ]:
+        if os.path.exists(path):
+            try:
+                with open(path, "r") as f:
+                    return json.load(f)
+            except Exception as e:
+                print(f"⚠️ {path} read error: {e}")
+
+    return None
+
+
+def init_firebase() -> bool:
     """Firebase Admin SDK initialize karo."""
     global _firebase_initialized
     if _firebase_initialized:
         return True
 
     try:
-        service_account_path = os.path.join(
-            os.path.dirname(__file__), "serviceAccountKey.json"
-        )
-        if os.path.exists(service_account_path):
-            cred = credentials.Certificate(service_account_path)
-            if not firebase_admin._apps:
-                firebase_admin.initialize_app(cred, {"databaseURL": DATABASE_URL})
-            _firebase_initialized = True
-            print("✅ Firebase Admin SDK initialized")
-            return True
-        else:
-            print("⚠️ serviceAccountKey.json nahi mila — REST API fallback use hoga")
+        sa_dict = _load_service_account()
+        if not sa_dict:
+            print("⚠️ Firebase credentials nahi mile — REST API fallback use hoga")
+            print("   Set FIREBASE_SERVICE_ACCOUNT_B64 env var on Render")
             return False
+
+        # Fix private key newlines (Render env vars mein \n escape ho jata hai)
+        if "private_key" in sa_dict and isinstance(sa_dict["private_key"], str):
+            sa_dict["private_key"] = sa_dict["private_key"].replace("\\n", "\n")
+
+        cred = credentials.Certificate(sa_dict)
+
+        if not firebase_admin._apps:
+            firebase_admin.initialize_app(cred, {"databaseURL": DATABASE_URL})
+
+        _firebase_initialized = True
+        print("✅ Firebase Admin SDK initialized")
+        return True
+
     except Exception as e:
         print(f"❌ Firebase init error: {e}")
         return False
 
 
 # ============================================================
-# 🌐 REST API
+# 🌐 REST API (fallback + direct access)
 # ============================================================
 def _rest_get(path: str):
     url = f"{DATABASE_URL}/{path}.json"
