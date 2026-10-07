@@ -1,31 +1,36 @@
 """
-CYBER TAMILAN — prediction_engine.py
+RAJPUT V9 ULTRA — prediction_engine.py
 
-Prediction engine — 1:1 Python port of the Java MainActivity.java
-prediction logic (package com.example.sddvippvt).
+Prediction engine — 1:1 Python port of the HTML/JavaScript
+RAJPUT V9 ULTRA prediction logic (from the <script> block).
 
-The old EaglePredictionEngine / BMW / Markov / priority-pattern logic
-has been 100% REMOVED and replaced with the Java algorithm:
+Old Java SDD VIP PVT logic (bigCount>2, random opposites, etc.)
+has been 100% REMOVED and replaced with the HTML engine:
 
   - generatePrediction()  -> generate_prediction()
-  - generateOpposites()   -> generate_opposites()
   - checkResult()         -> check_result()
-  - processApiData()      -> process_api_data()
+  - updatePredictionUI()  -> update_prediction_ui_state()
+  - appendHistoryItem()   -> append_history_item()
 
-Java rule (verbatim port):
-  - Look at last 5 results, count BIG.
-  - If bigCount > 2 -> predict "BIG", else "SMALL".
-  - Opposites = 2 random numbers from the OPPOSITE pool.
-  - WIN     = prediction matches actual size OR opposites contain actual number.
-  - JACKPOT = both conditions true.
+HTML rules (verbatim port):
+  - Pattern scan len 5..1 over size sequence.
+  - Recurrence: if dominant side > 60% AND >= 3 matches -> pick it.
+  - Bias fallback: majority side for that pattern len.
+  - DELTA-20 fallback: majority of last 20.
+  - Strict OPPOSITE flip (BIG<->SMALL).
+  - STREAK BREAK: if last 3 predictions identical -> flip.
+  - Weighted Sure Number: decay=0.9 on relevant nums, unseen nums doubled.
+  - JACKPOT 9x if num == sureNumber
+  - WIN 2x    if size == prediction
+  - LOSS      otherwise
 """
 
 from __future__ import annotations
 
 import json
+import math
 import random
 import time
-import urllib.parse
 import urllib.request
 from typing import Any, Dict, List, Optional
 
@@ -35,48 +40,50 @@ from typing import Any, Dict, List, Optional
 # ============================================================
 
 CONFIG = {
-    "period_seconds": 60,                # Java uses 60-second periods
-    "cache_ttl": 3,                      # Java polls every 3000 ms
-    "engine_name": "SDD VIP PVT",
-    "engine_code": "sddvip-pvt",
+    "period_seconds": 60,
+    "cache_ttl": 3,                # HTML polls every 3000 ms
+    "engine_name": "RAJPUT V9 ULTRA",
+    "engine_code": "rajput-v9-ultra",
 }
 
-# Java: API_URLS array — three fallback endpoints
 API_URLS = [
+    "https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json",
     "https://easy-share-server.lovable.app/api/public/WinGo_1M",
     "https://api-wingo1min.randorona.workers.dev/",
-    "https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json",
 ]
 
-# Java: B_POOL / S_POOL
+# HTML: pools used for weighted sure-number fallback
 B_POOL = [5, 6, 7, 8, 9]
 S_POOL = [0, 1, 2, 3, 4]
 
+MAX_HISTORY = 200
+
 
 # ============================================================
-# INTERNAL MUTABLE STATE (mirrors Java fields)
+# INTERNAL MUTABLE STATE (mirrors HTML JS globals)
 # ============================================================
 
-# Java: private ArrayList<HashMap<String, String>> apiHistory
-api_history: List[Dict[str, str]] = []
+# HTML: historyBuffer
+history_buffer: List[Dict[str, Any]] = []
 
-# Java: private String currentPeriod
+# HTML: window.lastPreds  (streak-break tracker, max 3)
+last_preds: List[str] = []
+
+# HTML: fullHistoryList (rendered history)
+history_list: List[Dict[str, str]] = []
+
+# HTML: currentPred / currentSure / currentLogic / currentPeriod
+current_pred: str = "WAIT"
+current_sure: Optional[int] = None
+current_logic: str = "AI MATRIX"
 current_period: str = ""
 
-# Java: fixed period tracking fields
-last_seen_api_period: Optional[str] = None
-predicted_for_period: Optional[str] = None
-saved_prediction: Optional[str] = None
-saved_opposites: List[int] = []
-result_checked_for_period: bool = False
-
-# Java counters
-win_count: int = 0
-loss_count: int = 0
-total_count: int = 0
-
-# Java historyList (for UI table)
-history_list: List[Dict[str, str]] = []
+# HTML: lastIssue / prevIssue tracking
+last_issue: Optional[str] = None
+prev_issue: Optional[str] = None
+prev_pred: Optional[str] = None
+prev_sure: Optional[int] = None
+prev_logic: Optional[str] = None
 
 # Fetch cache
 _last_fetch_ts: float = 0.0
@@ -95,7 +102,6 @@ def _to_int(value: Any, default: int = 0) -> int:
 
 
 def _http_get(url: str, timeout: float = 8.0) -> Optional[str]:
-    """Java's HttpURLConnection GET — Python equivalent."""
     try:
         req = urllib.request.Request(
             url,
@@ -113,15 +119,10 @@ def _http_get(url: str, timeout: float = 8.0) -> Optional[str]:
 
 
 # ============================================================
-# API FETCH — exact port of Java fetchApiData()
+# API FETCH
 # ============================================================
 
 def fetch_api_data() -> Optional[str]:
-    """
-    1:1 port of Java fetchApiData().
-    Tries each URL in API_URLS, returns first successful JSON body.
-    Caches for CONFIG['cache_ttl'] seconds.
-    """
     global _last_fetch_ts, _last_fetch_json
 
     now = time.time()
@@ -138,292 +139,374 @@ def fetch_api_data() -> Optional[str]:
     return None
 
 
-def get_api_short(url: str) -> str:
-    """Java: getApiShort()"""
-    if url and "lovable" in url:
-        return "API-1"
-    if url and "randorona" in url:
-        return "API-2"
-    if url and "ar-lottery" in url:
-        return "API-3"
-    return "API"
-
-
 # ============================================================
-# PREDICTION LOGIC — exact port of Java
+# 🎯 PREDICTION ENGINE — 100% HTML JS PORT
 # ============================================================
 
-def generate_prediction(history: List[Dict[str, str]]) -> str:
+def generate_prediction(history: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    1:1 port of Java generatePrediction().
+    1:1 port of HTML generatePrediction(history).
 
-    Last 5 results, count BIG. If bigCount > 2 -> "BIG", else "SMALL".
+    Args:
+        history: list of dicts with at least {"size": "BIG"|"SMALL",
+                 "num": int} OR {"number": "7"} — newest first.
+
+    Returns:
+        {"prediction": "BIG"|"SMALL", "sureNumber": int, "logic": str}
     """
-    big_count = 0
-    count = min(5, len(history))
-    for i in range(count):
-        try:
-            if _to_int(history[i].get("number")) >= 5:
-                big_count += 1
-        except Exception:
-            pass
-    return "BIG" if big_count > 2 else "SMALL"
+    global last_preds
 
+    # Normalise input -> size sequence (newest first as HTML uses history[0])
+    def _get_size(h: Dict[str, Any]) -> str:
+        if "size" in h and h["size"] in ("BIG", "SMALL"):
+            return h["size"]
+        num = _to_int(h.get("number") if "number" in h else h.get("num"))
+        return "BIG" if num >= 5 else "SMALL"
 
-def generate_opposites(prediction: str) -> List[int]:
-    """
-    1:1 port of Java generateOpposites().
+    size_seq = [_get_size(h) for h in history]
 
-    prediction == "BIG"  -> pick 2 random numbers from S_POOL (0-4)
-    prediction == "SMALL" -> pick 2 random numbers from B_POOL (5-9)
-    """
-    pool = S_POOL if prediction == "BIG" else B_POOL
-    shuffled = list(pool)
-    random.shuffle(shuffled)
-    return [shuffled[0], shuffled[1]]
+    best_size: Optional[str] = None
+    logic_applied = "AI MATRIX"
+
+    # --- Seed init: fewer than 5 results ---
+    if len(history) < 5:
+        best_size = "BIG" if random.random() > 0.5 else "SMALL"
+        logic_applied = "SEED INIT"
+    else:
+        # --- Pattern scan: len 5 -> 1 ---
+        for length in range(5, 0, -1):
+            if len(size_seq) < length + 1:
+                continue
+
+            recent = size_seq[:length]  # HTML: sizeSeq.slice(-len) — newest first
+            matches: List[str] = []
+
+            # HTML iterates over the whole seq; we mirror it on the newest-first list
+            for i in range(len(size_seq) - length):
+                matched = True
+                for j in range(length):
+                    if size_seq[i + j] != recent[j]:
+                        matched = False
+                        break
+                if matched and (i + length < len(size_seq)):
+                    matches.append(size_seq[i + length])
+
+            if not matches:
+                continue
+
+            big_count = matches.count("BIG")
+            small_count = matches.count("SMALL")
+            total = len(matches)
+
+            if total > 0 and (big_count / total) > 0.6 and big_count >= 3:
+                best_size = "BIG"
+                logic_applied = f"P-{length} RECUR"
+                break
+            if total > 0 and (small_count / total) > 0.6 and small_count >= 3:
+                best_size = "SMALL"
+                logic_applied = f"P-{length} RECUR"
+                break
+
+            if best_size is None:
+                if big_count > small_count:
+                    best_size = "BIG"
+                    logic_applied = f"P-{length} BIAS"
+                elif small_count > big_count:
+                    best_size = "SMALL"
+                    logic_applied = f"P-{length} BIAS"
+
+        # --- DELTA-20 fallback ---
+        if best_size is None:
+            recent20 = size_seq[:20]
+            big = recent20.count("BIG")
+            small = len(recent20) - big
+            if big > small:
+                best_size = "BIG"
+            elif small > big:
+                best_size = "SMALL"
+            else:
+                best_size = "BIG" if random.random() > 0.5 else "SMALL"
+            logic_applied = "DELTA-20"
+
+    # --- Strict OPPOSITE flip ---
+    best_size = "SMALL" if best_size == "BIG" else "BIG"
+
+    # --- Anti-repeat streak breaker (window.lastPreds, max 3) ---
+    if len(last_preds) >= 3 and all(p == best_size for p in last_preds):
+        best_size = "SMALL" if best_size == "BIG" else "BIG"
+        logic_applied = "STREAK BREAK"
+
+    last_preds.append(best_size)
+    if len(last_preds) > 3:
+        last_preds.pop(0)
+
+    # --- Weighted Sure Number ---
+    pool = B_POOL if best_size == "BIG" else S_POOL
+
+    relevant_nums: List[int] = []
+    for h in history:
+        n = _to_int(h.get("number") if "number" in h else h.get("num"))
+        if best_size == "BIG" and n >= 5:
+            relevant_nums.append(n)
+        elif best_size == "SMALL" and n < 5:
+            relevant_nums.append(n)
+
+    if not relevant_nums:
+        sure_number = pool[random.randint(0, len(pool) - 1)]
+    else:
+        weights: List[float] = []
+        total_weight = 0.0
+        decay = 0.9
+        for i in range(len(relevant_nums)):
+            w = math.pow(decay, len(relevant_nums) - 1 - i)
+            weights.append(w)
+            total_weight += w
+
+        weighted_nums: List[int] = []
+        for i in range(len(relevant_nums)):
+            count = math.ceil(weights[i] * 10 / total_weight) if total_weight > 0 else 1
+            for _ in range(count):
+                weighted_nums.append(relevant_nums[i])
+
+        for num in pool:
+            if num not in relevant_nums:
+                weighted_nums.append(num)
+                weighted_nums.append(num)
+
+        sure_number = weighted_nums[random.randint(0, len(weighted_nums) - 1)]
+
+    return {
+        "prediction": best_size,
+        "sureNumber": sure_number,
+        "logic": logic_applied,
+    }
 
 
 def check_result(
-    prediction: str,
-    opposites: List[int],
-    actual_number: int,
-    period: str,
+    current_number: int,
+    prev_issue: str,
+    prev_pred: str,
+    prev_sure: int,
+    prev_logic: str,
 ) -> Dict[str, Any]:
     """
-    1:1 port of Java checkResult().
-
-    WIN     = prediction matches actual size OR opposites contain actual number.
-    JACKPOT = both conditions true.
+    1:1 port of HTML checkResult(current, prevIssue, prevPred, prevSure, prevLogic).
     """
-    global win_count, loss_count, total_count
+    num = current_number
+    size = "BIG" if num >= 5 else "SMALL"
 
-    actual_size = "BIG" if actual_number >= 5 else "SMALL"
-    is_win = (prediction == actual_size) or (actual_number in opposites)
-    is_jackpot = is_win and (actual_number in opposites)
-
-    total_count += 1
-    if is_win:
-        win_count += 1
+    if num == prev_sure:
+        status_text = "JACKPOT 9x"
+        status_class = "badge-jackpot"
+        strip_class = "jackpot-status"
+    elif size == prev_pred:
+        status_text = "WIN 2x"
+        status_class = "badge-win"
+        strip_class = "win-status"
     else:
-        loss_count += 1
+        status_text = "LOSS 🍂"
+        status_class = "badge-loss"
+        strip_class = "loss-status"
 
-    result_str = "JACKPOT" if is_jackpot else ("WIN" if is_win else "LOSS")
-    add_to_history(period, prediction, result_str, actual_number)
+    now = time.localtime()
+    time_str = f"{now.tm_hour:02d}:{now.tm_min:02d}:{now.tm_sec:02d}"
 
-    return {
-        "period": period,
-        "prediction": prediction,
-        "result": result_str,
-        "actual": actual_number,
-        "isWin": is_win,
-        "isJackpot": is_jackpot,
-    }
-
-
-def add_to_history(period: str, prediction: str, result: str, actual: int) -> None:
-    """Java: addToHistory() — keeps last 50 entries."""
-    global history_list
-    history_list.append({
-        "period": period,
-        "prediction": prediction,
-        "result": result,
-        "actual": str(actual),
+    append_history_item({
+        "issue": prev_issue,
+        "pred": prev_pred,
+        "sure": prev_sure,
+        "actualNum": num,
+        "actualSize": size,
+        "statusText": status_text,
+        "statusClass": status_class,
+        "logic": prev_logic or "DECAY MATRIX",
+        "time": time_str,
     })
-    if len(history_list) > 50:
-        history_list.pop(0)
 
-
-def update_stats() -> Dict[str, Any]:
-    """Java: updateStats() — exposes counts + accuracy."""
-    acc = (win_count * 100 // total_count) if total_count > 0 else 0
     return {
-        "totalWins": win_count,
-        "totalLoss": loss_count,
-        "total": total_count,
-        "accuracy": acc,
+        "issue": prev_issue,
+        "prediction": prev_pred,
+        "sure": prev_sure,
+        "actualNum": num,
+        "actualSize": size,
+        "statusText": status_text,
+        "statusClass": status_class,
+        "stripClass": strip_class,
+        "logic": prev_logic,
+        "time": time_str,
+        "isJackpot": num == prev_sure,
+        "isWin": (size == prev_pred) or (num == prev_sure),
+    }
+
+
+def append_history_item(item: Dict[str, Any]) -> None:
+    """1:1 port of HTML appendHistoryItem(item)."""
+    global history_list
+    history_list.insert(0, item)
+    if len(history_list) > 40:
+        history_list.pop()
+
+
+# ============================================================
+# HTML: updatePredictionUI() equivalent
+# ============================================================
+
+def update_prediction_ui_state(
+    prediction: str,
+    target_num: int,
+    logic: str,
+    period_id: str,
+) -> Dict[str, Any]:
+    """
+    1:1 port of HTML updatePredictionUI(). Returns the UI-ready dict.
+    """
+    global current_pred, current_sure, current_logic, current_period
+    current_pred = prediction
+    current_sure = target_num
+    current_logic = logic
+    current_period = period_id
+
+    return {
+        "prediction": prediction,
+        "predClass": "pred-big" if prediction == "BIG" else "pred-small",
+        "targetNum": target_num,
+        "logic": logic,
+        "periodId": period_id[-5:] if len(period_id) > 5 else period_id,
+        "fullPeriodId": period_id,
     }
 
 
 # ============================================================
-# PROCESS API DATA — exact port of Java processApiData()
+# HISTORY PARSING FROM API JSON
 # ============================================================
 
-def process_api_data(json_data: str) -> Dict[str, Any]:
+def _parse_history(json_data: str) -> List[Dict[str, Any]]:
     """
-    1:1 port of Java processApiData().
-
-    Returns the current active signal dict (or {} if not enough data).
+    Parse API JSON -> list of {"issue", "num", "size"} (newest first).
+    Supports the same JSON shapes as HTML's `data?.data?.list`.
     """
-    global api_history, current_period
-    global last_seen_api_period, predicted_for_period
-    global saved_prediction, saved_opposites, result_checked_for_period
-
     try:
-        json_object = json.loads(json_data)
+        obj = json.loads(json_data)
     except Exception:
-        return {}
+        return []
 
-    # Java JSON extraction branches:
-    #   jsonObject.data.list  -> dataArray
-    #   jsonObject.Data       -> dataArray
-    #   jsonObject.list       -> dataArray
     data_array = None
-    if isinstance(json_object.get("data"), dict) and "list" in json_object["data"]:
-        data_array = json_object["data"]["list"]
-    elif "Data" in json_object:
-        data_array = json_object["Data"]
-    elif "list" in json_object:
-        data_array = json_object["list"]
+    if isinstance(obj.get("data"), dict) and "list" in obj["data"]:
+        data_array = obj["data"]["list"]
+    elif "Data" in obj:
+        data_array = obj["Data"]
+    elif "list" in obj:
+        data_array = obj["list"]
 
-    if not data_array or len(data_array) < 5:
-        return {}
+    if not data_array:
+        return []
 
-    # Rebuild apiHistory (newest first, as Java does)
-    api_history = []
+    out: List[Dict[str, Any]] = []
     for item in data_array:
-        issue = ""
-        num = ""
-        if "issueNumber" in item:
-            issue = str(item["issueNumber"])
-        elif "PeriodNo" in item:
-            issue = str(item["PeriodNo"])
-        elif "period" in item:
-            issue = str(item["period"])
-
-        if "number" in item:
-            num = str(item["number"])
-        elif "Number" in item:
-            num = str(item["Number"])
-
-        api_history.append({"issueNumber": issue, "number": num})
-
-    if len(api_history) < 5:
-        return {}
-
-    latest_period = api_history[0]["issueNumber"]
-    latest_number = api_history[0]["number"]
-    actual_num = _to_int(latest_number)
-    actual_size = "BIG" if actual_num >= 5 else "SMALL"
-
-    # Java: currentPeriod = latestPeriod + 1
-    try:
-        current_period = str(int(latest_period) + 1)
-    except Exception:
-        current_period = latest_period
-
-    popup_payload: Optional[Dict[str, Any]] = None
-
-    # ===== Java: CHECK RESULT ONLY WHEN API PERIOD ACTUALLY CHANGES =====
-    if last_seen_api_period is not None and last_seen_api_period != latest_period:
-        if predicted_for_period is not None and not result_checked_for_period:
-            for i in range(len(api_history)):
-                hist_period = api_history[i]["issueNumber"]
-                if hist_period == predicted_for_period:
-                    predicted_actual = _to_int(api_history[i]["number"])
-                    outcome = check_result(
-                        saved_prediction or "SMALL",
-                        saved_opposites,
-                        predicted_actual,
-                        predicted_for_period,
-                    )
-                    result_checked_for_period = True
-                    if outcome["isWin"]:
-                        popup_payload = {
-                            "period": predicted_for_period[-5:] if len(predicted_for_period) > 5 else predicted_for_period,
-                            "prediction": saved_prediction,
-                            "predNum": f"{saved_opposites[0]}, {saved_opposites[1]}" if len(saved_opposites) >= 2 else "",
-                            "actual": {"color": actual_size, "number": predicted_actual},
-                            "isJackpot": outcome["isJackpot"],
-                        }
-                    break
-
-    # ===== Java: GENERATE NEW PREDICTION ONLY IF NEEDED =====
-    active_signal: Dict[str, Any] = {}
-    if predicted_for_period is None or predicted_for_period != current_period:
-        prediction = generate_prediction(api_history)
-        opposites = generate_opposites(prediction)
-
-        saved_prediction = prediction
-        saved_opposites = opposites
-        predicted_for_period = current_period
-        result_checked_for_period = False
-
-        active_signal = {
-            "period": current_period,
-            "size": prediction,
-            "n1": opposites[0],
-            "n2": opposites[1],
-            "prediction": prediction,
-            "opposites": opposites,
-        }
-
-    # Java: lastSeenApiPeriod = latestPeriod
-    last_seen_api_period = latest_period
-
-    return {
-        "active": active_signal,
-        "popup": popup_payload,
-        "latestPeriod": latest_period,
-        "latestNumber": latest_number,
-        "latestSize": actual_size,
-        "currentPeriod": current_period,
-    }
+        issue = (
+            item.get("issueNumber")
+            or item.get("PeriodNo")
+            or item.get("period")
+            or ""
+        )
+        num_raw = item.get("number") or item.get("Number")
+        num = _to_int(num_raw)
+        out.append({
+            "issue": str(issue),
+            "num": num,
+            "size": "BIG" if num >= 5 else "SMALL",
+        })
+    return out
 
 
 # ============================================================
-# TIMER — Java: syncTimer() / updateTimer()
-# ============================================================
-
-def update_timer() -> Dict[str, Any]:
-    """
-    Java: timerSeconds = 60 - Calendar.SECOND.
-    """
-    now = int(time.time())
-    rem = CONFIG["period_seconds"] - (now % CONFIG["period_seconds"])
-    if rem >= CONFIG["period_seconds"]:
-        rem = 0
-    return {
-        "secondsLeft": rem,
-        "periodSeconds": CONFIG["period_seconds"],
-        "ringFraction": rem / CONFIG["period_seconds"],
-    }
-
-
-# ============================================================
-# MAIN ENGINE TICK — replaces old engine_pro()
+# MAIN ENGINE TICK
 # ============================================================
 
 def engine_pro() -> Dict[str, Any]:
     """
-    One tick: fetch API, process data, return state.
-    Port of Java startGame() + fetchApiData() + processApiData()
-    + updateTimer() + updateStats() combined into a single call.
+    One tick: fetch API -> update history -> generate/check prediction.
+    Mirrors HTML run() setInterval body.
     """
+    global history_buffer, last_issue, prev_issue, prev_pred, prev_sure, prev_logic
+    global current_pred, current_sure, current_logic, current_period
+
     body = fetch_api_data()
 
     if body is None:
         return {
             "ok": False,
-            "reason": "no_history",
-            "timer": update_timer(),
-            "stats": update_stats(),
+            "reason": "no_api",
+            "prediction": current_pred,
+            "sureNumber": current_sure,
+            "logic": current_logic,
+            "period": current_period,
             "history": list(history_list),
         }
 
-    processed = process_api_data(body)
+    api_list = _parse_history(body)
+    if not api_list:
+        return {
+            "ok": False,
+            "reason": "no_history",
+            "prediction": current_pred,
+            "sureNumber": current_sure,
+            "logic": current_logic,
+            "period": current_period,
+            "history": list(history_list),
+        }
+
+    current = api_list[0]
+    current_issue = current["issue"]
+    current_num = current["num"]
+    current_size = current["size"]
+
+    # HTML: historyBuffer.unshift if new issue
+    if not history_buffer or history_buffer[0]["issue"] != current_issue:
+        history_buffer.insert(0, {
+            "issue": current_issue,
+            "num": current_num,
+            "size": current_size,
+        })
+        if len(history_buffer) > MAX_HISTORY:
+            history_buffer.pop()
+
+    ui_signal: Optional[Dict[str, Any]] = None
+    result: Optional[Dict[str, Any]] = None
+
+    # HTML: if current.issueNumber !== lastIssue -> new period signal
+    if current_issue != last_issue:
+        last_issue = current_issue
+        target_period = current_issue
+
+        pred = generate_prediction(history_buffer)
+        ui_signal = update_prediction_ui_state(
+            pred["prediction"], pred["sureNumber"], pred["logic"], target_period
+        )
+
+    # HTML: if prevIssue && prevIssue !== current.issueNumber -> check result
+    if prev_issue and prev_issue != current_issue:
+        result = check_result(
+            current_num,
+            prev_issue,
+            prev_pred or "SMALL",
+            prev_sure if prev_sure is not None else 0,
+            prev_logic or "AI MATRIX",
+        )
+
+    # HTML: save prev = current
+    prev_issue = current_issue
+    prev_pred = current_pred
+    prev_sure = current_sure
+    prev_logic = current_logic
 
     return {
         "ok": True,
-        "issue": processed.get("latestPeriod", ""),
-        "nextPeriod": processed.get("currentPeriod", ""),
-        "active": processed.get("active") or None,
-        "popup": processed.get("popup"),
-        "latest": {
-            "number": processed.get("latestNumber", ""),
-            "size": processed.get("latestSize", ""),
-        },
-        "timer": update_timer(),
-        "stats": update_stats(),
+        "issue": current_issue,
+        "nextPeriod": target_period if ui_signal else current_issue,
+        "active": ui_signal,
+        "result": result,
+        "latest": {"number": current_num, "size": current_size},
         "history": list(history_list),
         "engine": {
             "name": CONFIG["engine_name"],
@@ -433,52 +516,41 @@ def engine_pro() -> Dict[str, Any]:
 
 
 # ============================================================
-# STATS ACCESSOR
-# ============================================================
-
-def get_stats() -> Dict[str, Any]:
-    return update_stats()
-
-
-# ============================================================
-# PUBLIC API — same entry point as before
+# PUBLIC API — same entry point
 # ============================================================
 
 def sddgamer263_predict() -> Dict[str, Any]:
-    """
-    Run one engine tick. Returns full state dict.
-    Callers invoke this once per tick (e.g. once per second).
-    """
+    """Run one engine tick. Returns full state dict."""
     return engine_pro()
 
 
 def reset() -> None:
-    """Clear all engine state (matches a page refresh / app restart)."""
-    global api_history, current_period
-    global last_seen_api_period, predicted_for_period
-    global saved_prediction, saved_opposites, result_checked_for_period
-    global win_count, loss_count, total_count, history_list
+    """Clear all engine state (page refresh / app restart)."""
+    global history_buffer, last_preds, history_list
+    global current_pred, current_sure, current_logic, current_period
+    global last_issue, prev_issue, prev_pred, prev_sure, prev_logic
     global _last_fetch_ts, _last_fetch_json
 
-    api_history = []
-    current_period = ""
-    last_seen_api_period = None
-    predicted_for_period = None
-    saved_prediction = None
-    saved_opposites = []
-    result_checked_for_period = False
-
-    win_count = 0
-    loss_count = 0
-    total_count = 0
+    history_buffer = []
+    last_preds = []
     history_list = []
+
+    current_pred = "WAIT"
+    current_sure = None
+    current_logic = "AI MATRIX"
+    current_period = ""
+
+    last_issue = None
+    prev_issue = None
+    prev_pred = None
+    prev_sure = None
+    prev_logic = None
 
     _last_fetch_ts = 0.0
     _last_fetch_json = None
 
 
 def clear_engine_cache() -> None:
-    """Clear only the fetch cache."""
     global _last_fetch_ts, _last_fetch_json
     _last_fetch_ts = 0.0
     _last_fetch_json = None
@@ -490,12 +562,11 @@ def clear_engine_cache() -> None:
 
 if __name__ == "__main__":
     reset()
-    print("Testing prediction_engine.py (Java SDD VIP PVT port) ...\n")
+    print("Testing prediction_engine.py (RAJPUT V9 ULTRA HTML port) ...\n")
 
-    # ---- Offline unit test of pure functions ----
-    print("=== Unit test: generate_prediction / generate_opposites / check_result ===")
+    # ---- Offline unit test ----
+    print("=== Unit test: generate_prediction ===")
 
-    # Fake history: 3 BIG in last 5 -> predict BIG
     fake = [
         {"issueNumber": "1005", "number": "7"},
         {"issueNumber": "1004", "number": "6"},
@@ -504,11 +575,11 @@ if __name__ == "__main__":
         {"issueNumber": "1001", "number": "1"},
     ]
     pred = generate_prediction(fake)
-    opps = generate_opposites(pred)
-    print(f"  generate_prediction({[h['number'] for h in fake]}) = {pred}")
-    print(f"  generate_opposites('{pred}') = {opps}")
+    print(f"  input sizes       = {[h.get('size') or ('BIG' if int(h['number'])>=5 else 'SMALL') for h in fake]}")
+    print(f"  -> prediction     = {pred['prediction']}")
+    print(f"  -> sureNumber     = {pred['sureNumber']}")
+    print(f"  -> logic          = {pred['logic']}\n")
 
-    # Fake history: only 1 BIG in last 5 -> predict SMALL
     fake2 = [
         {"issueNumber": "2005", "number": "1"},
         {"issueNumber": "2004", "number": "2"},
@@ -517,48 +588,37 @@ if __name__ == "__main__":
         {"issueNumber": "2001", "number": "0"},
     ]
     pred2 = generate_prediction(fake2)
-    print(f"  generate_prediction({[h['number'] for h in fake2]}) = {pred2}")
+    print(f"  -> prediction2    = {pred2['prediction']}")
+    print(f"  -> sureNumber2    = {pred2['sureNumber']}")
+    print(f"  -> logic2         = {pred2['logic']}\n")
 
-    # check_result test
-    out = check_result("BIG", [1, 2], 7, "1005")
-    print(f"  check_result(BIG, [1,2], 7) = {out['result']}  (expect WIN)")
-    out = check_result("BIG", [1, 2], 1, "1004")
-    print(f"  check_result(BIG, [1,2], 1) = {out['result']}  (expect JACKPOT)")
-    out = check_result("BIG", [1, 2], 3, "1003")
-    print(f"  check_result(BIG, [1,2], 3) = {out['result']}  (expect LOSS)")
-
-    print(f"  stats after 3 checks = {update_stats()}\n")
+    # ---- check_result test ----
+    print("=== Unit test: check_result ===")
+    r = check_result(7, "1005", "BIG", 7, "AI MATRIX")
+    print(f"  check_result(7,'1005','BIG',7)   = {r['statusText']} (expect JACKPOT 9x)")
+    r = check_result(6, "1004", "BIG", 3, "AI MATRIX")
+    print(f"  check_result(6,'1004','BIG',3)   = {r['statusText']} (expect WIN 2x)")
+    r = check_result(3, "1003", "BIG", 8, "AI MATRIX")
+    print(f"  check_result(3,'1003','BIG',8)   = {r['statusText']} (expect LOSS 🍂)\n")
 
     # ---- Live test ----
     print("=== Live Engine Test ===")
     for i in range(3):
         out = sddgamer263_predict()
-        timer = out.get("timer", {})
-        active = out.get("active")
-        stats = out.get("stats", {})
-
         if not out.get("ok"):
-            print(f"tick {i}: no history available ({out.get('reason')})")
+            print(f"tick {i}: no data ({out.get('reason')})")
         else:
-            if active:
+            act = out.get("active")
+            if act:
                 print(
-                    f"tick {i}: issue={out.get('issue')} "
-                    f"next={out.get('nextPeriod')} "
-                    f"signal={active.get('size')} "
-                    f"[{active.get('n1')} & {active.get('n2')}] "
-                    f"| secLeft={timer.get('secondsLeft')} "
-                    f"| W/L/T={stats.get('totalWins')}/{stats.get('totalLoss')}/{stats.get('total')} "
-                    f"| acc={stats.get('accuracy')}%"
+                    f"tick {i}: issue={out['issue']} "
+                    f"next={out['nextPeriod']} "
+                    f"signal={act['prediction']} sure={act['targetNum']} "
+                    f"logic={act['logic']}"
                 )
             else:
-                print(
-                    f"tick {i}: issue={out.get('issue')} — no active signal "
-                    f"| secLeft={timer.get('secondsLeft')}"
-                )
-
-        if out.get("popup"):
-            p = out["popup"]
-            tag = "JACKPOT" if p["isJackpot"] else "WIN"
-            print(f"        -> {tag}! period={p['period']} pred={p['prediction']} actual={p['actual']}")
-
+                print(f"tick {i}: issue={out['issue']} — no new signal")
+            if out.get("result"):
+                print(f"        -> {out['result']['statusText']} "
+                      f"(actual {out['result']['actualNum']} {out['result']['actualSize']})")
         time.sleep(2)
