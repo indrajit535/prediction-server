@@ -4,17 +4,16 @@ RAJPUT V9 ULTRA — prediction_engine.py
 Prediction engine — 1:1 Python port of the HTML/JavaScript
 RAJPUT V9 ULTRA prediction logic (from the <script> block).
 
-Old Java SDD VIP PVT logic (bigCount>2, random opposites, etc.)
-has been 100% REMOVED and replaced with the HTML engine:
-
+100% HTML ENGINE — OLD PYTHON LOGIC REMOVED:
   - generatePrediction()  -> generate_prediction()
   - checkResult()         -> check_result()
   - updatePredictionUI()  -> update_prediction_ui_state()
   - appendHistoryItem()   -> append_history_item()
+  - getNextPeriodString() -> get_next_period_string()
 
 HTML rules (verbatim port):
-  - Pattern scan len 5..1 over size sequence.
-  - Recurrence: if dominant side > 60% AND >= 3 matches -> pick it.
+  - Pattern scan len 5..1 over size sequence (newest first).
+  - Recurrence: dominant side > 60% AND >= 3 matches -> pick it.
   - Bias fallback: majority side for that pattern len.
   - DELTA-20 fallback: majority of last 20.
   - Strict OPPOSITE flip (BIG<->SMALL).
@@ -23,6 +22,7 @@ HTML rules (verbatim port):
   - JACKPOT 9x if num == sureNumber
   - WIN 2x    if size == prediction
   - LOSS      otherwise
+  - +1 NEXT PERIOD tracking (window.predictedPeriod)
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ from typing import Any, Dict, List, Optional
 
 CONFIG = {
     "period_seconds": 60,
-    "cache_ttl": 3,                # HTML polls every 3000 ms
+    "cache_ttl": 3,                # HTML polls every 2500 ms
     "engine_name": "RAJPUT V9 ULTRA",
     "engine_code": "rajput-v9-ultra",
 }
@@ -70,13 +70,22 @@ history_buffer: List[Dict[str, Any]] = []
 last_preds: List[str] = []
 
 # HTML: fullHistoryList (rendered history)
-history_list: List[Dict[str, str]] = []
+history_list: List[Dict[str, Any]] = []
+
+# HTML: window.predictedPeriod / activePred / activeSure / activeLogic
+predicted_period: Optional[str] = None
+active_pred: Optional[str] = None
+active_sure: Optional[int] = None
+active_logic: Optional[str] = None
 
 # HTML: currentPred / currentSure / currentLogic / currentPeriod
 current_pred: str = "WAIT"
 current_sure: Optional[int] = None
 current_logic: str = "AI MATRIX"
 current_period: str = ""
+
+# HTML: lastProcessedDraw
+last_processed_draw: Optional[str] = None
 
 # HTML: lastIssue / prevIssue tracking
 last_issue: Optional[str] = None
@@ -119,6 +128,25 @@ def _http_get(url: str, timeout: float = 8.0) -> Optional[str]:
 
 
 # ============================================================
+# HTML: getNextPeriodString(issueStr)
+# ============================================================
+
+def get_next_period_string(issue_str: str) -> str:
+    """
+    1:1 port of HTML getNextPeriodString().
+    Safely calculates NEXT (+1) period.
+    """
+    try:
+        # BigInt behaviour for large numbers
+        return str(int(issue_str) + 1)
+    except (ValueError, TypeError):
+        try:
+            return str(int(issue_str) + 1)
+        except Exception:
+            return issue_str
+
+
+# ============================================================
 # API FETCH
 # ============================================================
 
@@ -149,21 +177,12 @@ def generate_prediction(history: List[Dict[str, Any]]) -> Dict[str, Any]:
 
     Args:
         history: list of dicts with at least {"size": "BIG"|"SMALL",
-                 "num": int} OR {"number": "7"} — newest first.
+                 "num": int} — NEWEST FIRST (index 0 = latest).
 
     Returns:
         {"prediction": "BIG"|"SMALL", "sureNumber": int, "logic": str}
     """
     global last_preds
-
-    # Normalise input -> size sequence (newest first as HTML uses history[0])
-    def _get_size(h: Dict[str, Any]) -> str:
-        if "size" in h and h["size"] in ("BIG", "SMALL"):
-            return h["size"]
-        num = _to_int(h.get("number") if "number" in h else h.get("num"))
-        return "BIG" if num >= 5 else "SMALL"
-
-    size_seq = [_get_size(h) for h in history]
 
     best_size: Optional[str] = None
     logic_applied = "AI MATRIX"
@@ -173,15 +192,33 @@ def generate_prediction(history: List[Dict[str, Any]]) -> Dict[str, Any]:
         best_size = "BIG" if random.random() > 0.5 else "SMALL"
         logic_applied = "SEED INIT"
     else:
+        # HTML: const sizeSeq = history.map(h => h.size);
+        # NOTE: HTML history is NEWEST FIRST (index 0 = newest).
+        # Python history_buffer is also NEWEST FIRST.
+        size_seq = [h["size"] for h in history]
+
         # --- Pattern scan: len 5 -> 1 ---
         for length in range(5, 0, -1):
             if len(size_seq) < length + 1:
                 continue
 
-            recent = size_seq[:length]  # HTML: sizeSeq.slice(-len) — newest first
+            # HTML: const recent = sizeSeq.slice(-len);
+            # slice(-len) = LAST `len` items of array.
+            # Since array is newest-first, slice(-len) = OLDEST `len` items.
+            # We must mirror this EXACTLY.
+            recent = size_seq[-length:] if length > 0 else []
+
             matches: List[str] = []
 
-            # HTML iterates over the whole seq; we mirror it on the newest-first list
+            # HTML: for (let i = 0; i < sizeSeq.length - len; i++) {
+            #         let match = true;
+            #         for (let j = 0; j < len; j++) {
+            #           if (sizeSeq[i + j] !== recent[j]) { match = false; break; }
+            #         }
+            #         if (match && (i + len < sizeSeq.length)) {
+            #           matches.push(sizeSeq[i + len]);
+            #         }
+            #       }
             for i in range(len(size_seq) - length):
                 matched = True
                 for j in range(length):
@@ -194,19 +231,24 @@ def generate_prediction(history: List[Dict[str, Any]]) -> Dict[str, Any]:
             if not matches:
                 continue
 
+            # HTML: const bigCount = matches.filter(s => s === 'BIG').length;
             big_count = matches.count("BIG")
             small_count = matches.count("SMALL")
             total = len(matches)
 
+            # HTML: if (bigCount / total > 0.6 && bigCount >= 3)
             if total > 0 and (big_count / total) > 0.6 and big_count >= 3:
                 best_size = "BIG"
                 logic_applied = f"P-{length} RECUR"
                 break
+
+            # HTML: if (smallCount / total > 0.6 && smallCount >= 3)
             if total > 0 and (small_count / total) > 0.6 and small_count >= 3:
                 best_size = "SMALL"
                 logic_applied = f"P-{length} RECUR"
                 break
 
+            # HTML: if (!bestSize) { bias fallback }
             if best_size is None:
                 if big_count > small_count:
                     best_size = "BIG"
@@ -215,9 +257,10 @@ def generate_prediction(history: List[Dict[str, Any]]) -> Dict[str, Any]:
                     best_size = "SMALL"
                     logic_applied = f"P-{length} BIAS"
 
-        # --- DELTA-20 fallback ---
+        # --- HTML: DELTA-20 fallback ---
+        # const recent20 = sizeSeq.slice(-20);
         if best_size is None:
-            recent20 = size_seq[:20]
+            recent20 = size_seq[-20:] if len(size_seq) >= 20 else size_seq[:]
             big = recent20.count("BIG")
             small = len(recent20) - big
             if big > small:
@@ -228,51 +271,77 @@ def generate_prediction(history: List[Dict[str, Any]]) -> Dict[str, Any]:
                 best_size = "BIG" if random.random() > 0.5 else "SMALL"
             logic_applied = "DELTA-20"
 
-    # --- Strict OPPOSITE flip ---
+    # --- HTML: Strict OPPOSITE flip ---
+    # bestSize = bestSize === 'BIG' ? 'SMALL' : 'BIG';
     best_size = "SMALL" if best_size == "BIG" else "BIG"
 
-    # --- Anti-repeat streak breaker (window.lastPreds, max 3) ---
-    if len(last_preds) >= 3 and all(p == best_size for p in last_preds):
-        best_size = "SMALL" if best_size == "BIG" else "BIG"
-        logic_applied = "STREAK BREAK"
+    # --- HTML: Anti-repeat streak breaker ---
+    # if (window.lastPreds && window.lastPreds.length >= 3) {
+    #   if (window.lastPreds.every(p => p === bestSize)) {
+    #     bestSize = bestSize === 'BIG' ? 'SMALL' : 'BIG';
+    #     logicApplied = "STREAK BREAK";
+    #   }
+    # }
+    if last_preds and len(last_preds) >= 3:
+        if all(p == best_size for p in last_preds[-3:]):
+            best_size = "SMALL" if best_size == "BIG" else "BIG"
+            logic_applied = "STREAK BREAK"
 
     last_preds.append(best_size)
     if len(last_preds) > 3:
         last_preds.pop(0)
 
-    # --- Weighted Sure Number ---
+    # --- HTML: Weighted Sure Number calculation ---
+    # const pool = bestSize === 'BIG' ? [5,6,7,8,9] : [0,1,2,3,4];
     pool = B_POOL if best_size == "BIG" else S_POOL
 
+    # const relevantNums = history
+    #   .filter(h => (bestSize === 'BIG' ? h.num >= 5 : h.num < 5))
+    #   .map(h => h.num);
     relevant_nums: List[int] = []
     for h in history:
-        n = _to_int(h.get("number") if "number" in h else h.get("num"))
+        n = _to_int(h.get("num") if "num" in h else h.get("number"))
         if best_size == "BIG" and n >= 5:
             relevant_nums.append(n)
         elif best_size == "SMALL" and n < 5:
             relevant_nums.append(n)
 
+    # HTML: if (relevantNums.length === 0) { random from pool }
     if not relevant_nums:
         sure_number = pool[random.randint(0, len(pool) - 1)]
     else:
+        # HTML: weighted distribution
         weights: List[float] = []
         total_weight = 0.0
         decay = 0.9
+
         for i in range(len(relevant_nums)):
-            w = math.pow(decay, len(relevant_nums) - 1 - i)
-            weights.append(w)
-            total_weight += w
+            weight = math.pow(decay, len(relevant_nums) - 1 - i)
+            weights.append(weight)
+            total_weight += weight
 
         weighted_nums: List[int] = []
         for i in range(len(relevant_nums)):
-            count = math.ceil(weights[i] * 10 / total_weight) if total_weight > 0 else 1
+            # HTML: const count = Math.ceil(weights[i] * 10 / totalWeight);
+            if total_weight > 0:
+                count = math.ceil(weights[i] * 10 / total_weight)
+            else:
+                count = 1
             for _ in range(count):
                 weighted_nums.append(relevant_nums[i])
 
+        # HTML: for (let num of pool) {
+        #         if (!relevantNums.includes(num)) {
+        #           weightedNums.push(num);
+        #           weightedNums.push(num);
+        #         }
+        #       }
         for num in pool:
             if num not in relevant_nums:
                 weighted_nums.append(num)
                 weighted_nums.append(num)
 
+        # HTML: sureNumber = weightedNums[Math.floor(Math.random() * weightedNums.length)];
         sure_number = weighted_nums[random.randint(0, len(weighted_nums) - 1)]
 
     return {
@@ -295,19 +364,23 @@ def check_result(
     num = current_number
     size = "BIG" if num >= 5 else "SMALL"
 
+    # HTML: default LOSS
+    status_text = "LOSS 🍂"
+    status_class = "badge-loss"
+    strip_class = "loss-status"
+
+    # HTML: if (num === prevSure) -> JACKPOT 9x
     if num == prev_sure:
         status_text = "JACKPOT 9x"
         status_class = "badge-jackpot"
         strip_class = "jackpot-status"
+    # HTML: else if (size === prevPred) -> WIN 2x
     elif size == prev_pred:
         status_text = "WIN 2x"
         status_class = "badge-win"
         strip_class = "win-status"
-    else:
-        status_text = "LOSS 🍂"
-        status_class = "badge-loss"
-        strip_class = "loss-status"
 
+    # HTML: time string HH:MM:SS
     now = time.localtime()
     time_str = f"{now.tm_hour:02d}:{now.tm_min:02d}:{now.tm_sec:02d}"
 
@@ -319,7 +392,7 @@ def check_result(
         "actualSize": size,
         "statusText": status_text,
         "statusClass": status_class,
-        "logic": prev_logic or "DECAY MATRIX",
+        "logic": prev_logic or "AI MATRIX",
         "time": time_str,
     })
 
@@ -340,7 +413,10 @@ def check_result(
 
 
 def append_history_item(item: Dict[str, Any]) -> None:
-    """1:1 port of HTML appendHistoryItem(item)."""
+    """
+    1:1 port of HTML appendHistoryItem(item).
+    HTML inserts at BEGINNING and keeps max 40 items.
+    """
     global history_list
     history_list.insert(0, item)
     if len(history_list) > 40:
@@ -358,7 +434,8 @@ def update_prediction_ui_state(
     period_id: str,
 ) -> Dict[str, Any]:
     """
-    1:1 port of HTML updatePredictionUI(). Returns the UI-ready dict.
+    1:1 port of HTML updatePredictionUI().
+    Sets global current_* and returns UI-ready dict.
     """
     global current_pred, current_sure, current_logic, current_period
     current_pred = prediction
@@ -366,12 +443,18 @@ def update_prediction_ui_state(
     current_logic = logic
     current_period = period_id
 
+    # HTML: periodEl.innerText = (periodId && periodId !== "SYNC") ? String(periodId).slice(-5) : "SYNCING...";
+    if period_id and period_id != "SYNC":
+        display_period = str(period_id)[-5:]
+    else:
+        display_period = "SYNCING..."
+
     return {
         "prediction": prediction,
         "predClass": "pred-big" if prediction == "BIG" else "pred-small",
         "targetNum": target_num,
         "logic": logic,
-        "periodId": period_id[-5:] if len(period_id) > 5 else period_id,
+        "periodId": display_period,
         "fullPeriodId": period_id,
     }
 
@@ -382,8 +465,8 @@ def update_prediction_ui_state(
 
 def _parse_history(json_data: str) -> List[Dict[str, Any]]:
     """
-    Parse API JSON -> list of {"issue", "num", "size"} (newest first).
-    Supports the same JSON shapes as HTML's `data?.data?.list`.
+    Parse API JSON -> list of {"issue", "num", "size"} (NEWEST FIRST).
+    Mirrors HTML: data?.data?.list
     """
     try:
         obj = json.loads(json_data)
@@ -420,39 +503,74 @@ def _parse_history(json_data: str) -> List[Dict[str, Any]]:
 
 
 # ============================================================
-# MAIN ENGINE TICK
+# MAIN ENGINE TICK — mirrors HTML run() setInterval body
 # ============================================================
 
 def engine_pro() -> Dict[str, Any]:
     """
-    One tick: fetch API -> update history -> generate/check prediction.
-    Mirrors HTML run() setInterval body.
+    1:1 port of HTML run() setInterval callback.
+
+    Flow:
+      1. Fetch API -> list[0] = current draw
+      2. If current.issueNumber !== lastProcessedDraw:
+         a. If predictedPeriod == current.issueNumber -> checkResult()
+         b. Update historyBuffer (unshift if new issue)
+         c. lastProcessedDraw = current.issueNumber
+         d. nextPeriod = getNextPeriodString(current.issueNumber)
+         e. generatePrediction(historyBuffer)
+         f. Store predictedPeriod / activePred / activeSure / activeLogic
+         g. updatePredictionUI(pred, sure, logic, nextPeriod)
     """
-    global history_buffer, last_issue, prev_issue, prev_pred, prev_sure, prev_logic
+    global history_buffer, last_processed_draw
+    global predicted_period, active_pred, active_sure, active_logic
+    global last_issue, prev_issue, prev_pred, prev_sure, prev_logic
     global current_pred, current_sure, current_logic, current_period
 
     body = fetch_api_data()
 
     if body is None:
+        # HTML: offline fallback — only if no predictedPeriod yet
+        if not predicted_period:
+            fallback = generate_prediction(history_buffer)
+            ui = update_prediction_ui_state(
+                fallback["prediction"],
+                fallback["sureNumber"],
+                fallback["logic"],
+                "SYNC",
+            )
+            return {
+                "ok": False,
+                "reason": "no_api",
+                "active": ui,
+                "history": list(history_list),
+            }
         return {
             "ok": False,
             "reason": "no_api",
-            "prediction": current_pred,
-            "sureNumber": current_sure,
-            "logic": current_logic,
-            "period": current_period,
+            "active": None,
             "history": list(history_list),
         }
 
     api_list = _parse_history(body)
     if not api_list:
+        if not predicted_period:
+            fallback = generate_prediction(history_buffer)
+            ui = update_prediction_ui_state(
+                fallback["prediction"],
+                fallback["sureNumber"],
+                fallback["logic"],
+                "SYNC",
+            )
+            return {
+                "ok": False,
+                "reason": "no_history",
+                "active": ui,
+                "history": list(history_list),
+            }
         return {
             "ok": False,
             "reason": "no_history",
-            "prediction": current_pred,
-            "sureNumber": current_sure,
-            "logic": current_logic,
-            "period": current_period,
+            "active": None,
             "history": list(history_list),
         }
 
@@ -461,40 +579,59 @@ def engine_pro() -> Dict[str, Any]:
     current_num = current["num"]
     current_size = current["size"]
 
-    # HTML: historyBuffer.unshift if new issue
-    if not history_buffer or history_buffer[0]["issue"] != current_issue:
-        history_buffer.insert(0, {
-            "issue": current_issue,
-            "num": current_num,
-            "size": current_size,
-        })
-        if len(history_buffer) > MAX_HISTORY:
-            history_buffer.pop()
-
     ui_signal: Optional[Dict[str, Any]] = None
     result: Optional[Dict[str, Any]] = None
 
-    # HTML: if current.issueNumber !== lastIssue -> new period signal
-    if current_issue != last_issue:
-        last_issue = current_issue
-        target_period = current_issue
+    # HTML: if (current.issueNumber !== lastProcessedDraw) { ... }
+    if current_issue != last_processed_draw:
 
+        # 1. HTML: if (window.predictedPeriod && window.predictedPeriod === current.issueNumber)
+        #         checkResult(current, window.predictedPeriod, window.activePred, window.activeSure, window.activeLogic);
+        if predicted_period and predicted_period == current_issue:
+            result = check_result(
+                current_num,
+                predicted_period,
+                active_pred or "SMALL",
+                active_sure if active_sure is not None else 0,
+                active_logic or "AI MATRIX",
+            )
+
+        # 2. HTML: historyBuffer.unshift if new issue
+        if not history_buffer or history_buffer[0]["issue"] != current_issue:
+            history_buffer.insert(0, {
+                "issue": current_issue,
+                "num": current_num,
+                "size": current_size,
+            })
+            if len(history_buffer) > MAX_HISTORY:
+                history_buffer.pop()
+
+        last_processed_draw = current_issue
+
+        # 3. HTML: const nextPeriod = getNextPeriodString(current.issueNumber);
+        next_period = get_next_period_string(current_issue)
+
+        # 4. HTML: const { prediction, sureNumber, logic } = generatePrediction(historyBuffer);
         pred = generate_prediction(history_buffer)
+
+        # 5. HTML: window.predictedPeriod = nextPeriod;
+        #         window.activePred = prediction;
+        #         window.activeSure = sureNumber;
+        #         window.activeLogic = logic;
+        predicted_period = next_period
+        active_pred = pred["prediction"]
+        active_sure = pred["sureNumber"]
+        active_logic = pred["logic"]
+
+        # 6. HTML: updatePredictionUI(prediction, sureNumber, logic, nextPeriod);
         ui_signal = update_prediction_ui_state(
-            pred["prediction"], pred["sureNumber"], pred["logic"], target_period
+            pred["prediction"],
+            pred["sureNumber"],
+            pred["logic"],
+            next_period,
         )
 
-    # HTML: if prevIssue && prevIssue !== current.issueNumber -> check result
-    if prev_issue and prev_issue != current_issue:
-        result = check_result(
-            current_num,
-            prev_issue,
-            prev_pred or "SMALL",
-            prev_sure if prev_sure is not None else 0,
-            prev_logic or "AI MATRIX",
-        )
-
-    # HTML: save prev = current
+    # HTML: save prev = current (implicit in HTML via lastProcessedDraw)
     prev_issue = current_issue
     prev_pred = current_pred
     prev_sure = current_sure
@@ -503,7 +640,7 @@ def engine_pro() -> Dict[str, Any]:
     return {
         "ok": True,
         "issue": current_issue,
-        "nextPeriod": target_period if ui_signal else current_issue,
+        "nextPeriod": predicted_period if predicted_period else current_issue,
         "active": ui_signal,
         "result": result,
         "latest": {"number": current_num, "size": current_size},
@@ -516,7 +653,7 @@ def engine_pro() -> Dict[str, Any]:
 
 
 # ============================================================
-# PUBLIC API — same entry point
+# PUBLIC API
 # ============================================================
 
 def sddgamer263_predict() -> Dict[str, Any]:
@@ -527,7 +664,9 @@ def sddgamer263_predict() -> Dict[str, Any]:
 def reset() -> None:
     """Clear all engine state (page refresh / app restart)."""
     global history_buffer, last_preds, history_list
+    global predicted_period, active_pred, active_sure, active_logic
     global current_pred, current_sure, current_logic, current_period
+    global last_processed_draw
     global last_issue, prev_issue, prev_pred, prev_sure, prev_logic
     global _last_fetch_ts, _last_fetch_json
 
@@ -535,10 +674,17 @@ def reset() -> None:
     last_preds = []
     history_list = []
 
+    predicted_period = None
+    active_pred = None
+    active_sure = None
+    active_logic = None
+
     current_pred = "WAIT"
     current_sure = None
     current_logic = "AI MATRIX"
     current_period = ""
+
+    last_processed_draw = None
 
     last_issue = None
     prev_issue = None
@@ -562,37 +708,38 @@ def clear_engine_cache() -> None:
 
 if __name__ == "__main__":
     reset()
-    print("Testing prediction_engine.py (RAJPUT V9 ULTRA HTML port) ...\n")
+    print("Testing prediction_engine.py (RAJPUT V9 ULTRA — 100% HTML port) ...\n")
 
-    # ---- Offline unit test ----
-    print("=== Unit test: generate_prediction ===")
+    # ---- Offline unit test: generate_prediction ----
+    print("=== Unit test: generate_prediction (HTML exact) ===")
 
+    # HTML test: 5 items newest first
     fake = [
-        {"issueNumber": "1005", "number": "7"},
-        {"issueNumber": "1004", "number": "6"},
-        {"issueNumber": "1003", "number": "8"},
-        {"issueNumber": "1002", "number": "2"},
-        {"issueNumber": "1001", "number": "1"},
+        {"issue": "1005", "num": 7, "size": "BIG"},
+        {"issue": "1004", "num": 6, "size": "BIG"},
+        {"issue": "1003", "num": 8, "size": "BIG"},
+        {"issue": "1002", "num": 2, "size": "SMALL"},
+        {"issue": "1001", "num": 1, "size": "SMALL"},
     ]
     pred = generate_prediction(fake)
-    print(f"  input sizes       = {[h.get('size') or ('BIG' if int(h['number'])>=5 else 'SMALL') for h in fake]}")
+    print(f"  input sizes (newest first) = {[h['size'] for h in fake]}")
     print(f"  -> prediction     = {pred['prediction']}")
     print(f"  -> sureNumber     = {pred['sureNumber']}")
     print(f"  -> logic          = {pred['logic']}\n")
 
     fake2 = [
-        {"issueNumber": "2005", "number": "1"},
-        {"issueNumber": "2004", "number": "2"},
-        {"issueNumber": "2003", "number": "9"},
-        {"issueNumber": "2002", "number": "3"},
-        {"issueNumber": "2001", "number": "0"},
+        {"issue": "2005", "num": 1, "size": "SMALL"},
+        {"issue": "2004", "num": 2, "size": "SMALL"},
+        {"issue": "2003", "num": 9, "size": "BIG"},
+        {"issue": "2002", "num": 3, "size": "SMALL"},
+        {"issue": "2001", "num": 0, "size": "SMALL"},
     ]
     pred2 = generate_prediction(fake2)
     print(f"  -> prediction2    = {pred2['prediction']}")
     print(f"  -> sureNumber2    = {pred2['sureNumber']}")
     print(f"  -> logic2         = {pred2['logic']}\n")
 
-    # ---- check_result test ----
+    # ---- Unit test: check_result ----
     print("=== Unit test: check_result ===")
     r = check_result(7, "1005", "BIG", 7, "AI MATRIX")
     print(f"  check_result(7,'1005','BIG',7)   = {r['statusText']} (expect JACKPOT 9x)")
@@ -600,6 +747,11 @@ if __name__ == "__main__":
     print(f"  check_result(6,'1004','BIG',3)   = {r['statusText']} (expect WIN 2x)")
     r = check_result(3, "1003", "BIG", 8, "AI MATRIX")
     print(f"  check_result(3,'1003','BIG',8)   = {r['statusText']} (expect LOSS 🍂)\n")
+
+    # ---- Unit test: get_next_period_string ----
+    print("=== Unit test: get_next_period_string ===")
+    print(f"  '202610060088' -> {get_next_period_string('202610060088')}")
+    print(f"  '1005'         -> {get_next_period_string('1005')}\n")
 
     # ---- Live test ----
     print("=== Live Engine Test ===")
