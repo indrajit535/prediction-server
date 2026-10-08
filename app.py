@@ -1,19 +1,12 @@
 """
-FastAPI Prediction Server — Wingo 1 Min Mode (v8.0 ULTRA SECURE)
------------------------------------------------------------------
-🚀 DEPLOYED ON: Render
-🌐 FRONTEND: AI Studio + Netlify
-🔐 SECURITY LAYERS:
-  1. Session Token System (HMAC-signed, 30 min TTL)
-  2. One-Time Token (nonce) — ek token = ek prediction
-  3. Device Binding (IP + Device ID)
-  4. Origin Validation (Netlify domain only)
-  5. App Signature Validation (optional)
-  6. HMAC Signature on every prediction
-  7. Time-Lock Nonce (replay attack protection)
-  8. Rate Limiting + Auto-Block
-  9. Anti-Echo + Strict Next Period
-  10. Realistic Confidence (92.5–98.8%)
+FastAPI Prediction Server — Wingo 1 Min Mode (v7.0 PRODUCTION)
+---------------------------------------------------------------
+✅ FIX 1: Strict next-period prediction (latest completed + 1)
+✅ FIX 2: Anti-echo validation (never repeat last winning number)
+✅ FIX 3: Cache TTL 35s + auto-purge on new period detection
+✅ FIX 4: Realistic confidence (92.5–98.8%), retries, backup endpoint
+✅ Firebase Integration (Key validation, Server status, Withdrawal)
+✅ Admin Panel Control | CORS allow_origins=["*"]
 """
 
 from fastapi import FastAPI, Query, HTTPException, Request
@@ -27,10 +20,6 @@ import json
 import random
 import time
 import os
-import hmac
-import hashlib
-import secrets
-from collections import defaultdict
 
 from firebase_config import (
     FIREBASE_WEB_CONFIG,
@@ -43,89 +32,36 @@ from firebase_config import (
     init_firebase,
 )
 
-# ✅ NAVEEN AI PREDICTION ENGINE (with fallback)
-try:
-    from prediction_engine import sddgamer263_predict
-    ENGINE_AVAILABLE = True
-except Exception as e:
-    print(f"⚠️ prediction_engine import failed: {e}")
-    print("   Fallback engine will be used.")
-    ENGINE_AVAILABLE = False
-
-    def sddgamer263_predict(current_number: int, period: str) -> dict:
-        """Fallback engine agar prediction_engine.py না থাকে।"""
-        big_small = "BIG" if current_number >= 5 else "SMALL"
-        pool = [5, 6, 7, 8, 9] if big_small == "BIG" else [0, 1, 2, 3, 4]
-        num = random.choice([n for n in pool if n != current_number])
-        return {
-            "bigSmall": big_small,
-            "prediction": num,
-            "confidence": 94.0 + random.random() * 4.0,
-            "numbers": [num],
-            "steps": ["fallback-engine"],
-            "source": "fallback",
-        }
+# ✅ NAVEEN AI PREDICTION ENGINE
+from prediction_engine import sddgamer263_predict
 
 # Firebase init on startup
 init_firebase()
 
 app = FastAPI(
     title="Wingo Prediction API",
-    description="Wingo 1M prediction server — SDD AI MATRIX v2026 (ULTRA SECURE)",
-    version="8.0.0"
+    description="Wingo 1M prediction server — SDD AI MATRIX v2026",
+    version="7.0.0"
 )
 
-
-# ============================================================
-# 🌐 CORS CONFIG — Netlify + Local
-# ============================================================
-ALLOWED_ORIGINS = [
-    "https://your-site.netlify.app",         # ← apna Netlify URL
-    "https://your-custom-domain.com",        # ← custom domain (agar hai)
-    "http://localhost:3000",                 # ← local testing
-    "http://localhost:5173",                 # ← Vite dev server
-    "http://127.0.0.1:5500",                 # ← VS Code Live Server
-    "http://localhost:8000",                 # ← FastAPI local
-]
-
+# CORS — allow all origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
 # ============================================================
-# 🔐 SECURITY CONFIG
+# 🔐 ADMIN PASSWORD
 # ============================================================
-SERVER_MASTER_SECRET = os.environ.get(
-    "SERVER_MASTER_SECRET",
-    "SDD263_MASTER_SECRET_CHANGE_THIS_IN_PRODUCTION_9f8e7d6c"
-)
-
-APP_VERIFY_SECRET = os.environ.get(
-    "APP_VERIFY_SECRET",
-    "SDD263_APP_VERIFY_CHANGE_THIS_5b4a3c2d1e0f"
-)
-
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "SDD263@@")
-
-REQUIRE_APP_SIGNATURE = os.environ.get(
-    "REQUIRE_APP_SIGNATURE", "false"
-).lower() == "true"
-
-ALLOWED_APP_SIGNATURES = []
-
-SESSION_TTL_SEC = 1800       # 30 minutes
-RATE_LIMIT_PER_MIN = 15      # Max 15 requests per minute
-BLOCK_DURATION_SEC = 600     # Auto-block 10 min
-PREDICTION_TTL_SEC = 35      # Cache TTL
+ADMIN_PASSWORD = "SDD263@@"
 
 
 # ============================================================
-# 🌐 HISTORY API ENDPOINTS
+# 🌐 HISTORY API ENDPOINTS (PRIMARY + BACKUP)
 # ============================================================
 PRIMARY_HISTORY_API = (
     "https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json"
@@ -139,214 +75,46 @@ IST = timezone(timedelta(hours=5, minutes=30))
 
 
 # ============================================================
-# 🔐 SECURITY STATE (in-memory)
-# ============================================================
-ACTIVE_SESSIONS: Dict[str, dict] = {}
-REQUEST_LOG: Dict[str, list] = defaultdict(list)
-BLOCKED_KEYS: Dict[str, float] = {}
-USED_TOKENS: set = set()
-
-
-def _cleanup_sessions():
-    now = time.time()
-    expired = [
-        t for t, s in ACTIVE_SESSIONS.items()
-        if now > s.get("expires", 0)
-    ]
-    for t in expired:
-        ACTIVE_SESSIONS.pop(t, None)
-        USED_TOKENS.discard(t)
-
-
-# ============================================================
-# 🔑 SESSION TOKEN SYSTEM
-# ============================================================
-def generate_session_token(key: str, ip: str, device_id: str) -> str:
-    now = int(time.time())
-    expires = now + SESSION_TTL_SEC
-    nonce = secrets.token_hex(8)
-
-    payload = f"{key}|{expires}|{nonce}"
-    signature = hmac.new(
-        SERVER_MASTER_SECRET.encode(),
-        payload.encode(),
-        hashlib.sha256
-    ).hexdigest()
-
-    token = f"{payload}|{signature}"
-
-    ACTIVE_SESSIONS[token] = {
-        "key": key,
-        "expires": expires,
-        "createdAt": now,
-        "ip": ip,
-        "deviceId": device_id,
-        "requests": 0,
-    }
-
-    return token
-
-
-def verify_session_token(
-    token: str,
-    ip: str,
-    device_id: str,
-    consume: bool = False
-) -> Optional[dict]:
-    if not token or token.count("|") != 3:
-        return None
-
-    try:
-        key, expires_str, nonce, signature = token.split("|")
-        expires = int(expires_str)
-    except ValueError:
-        return None
-
-    payload = f"{key}|{expires}|{nonce}"
-    expected_sig = hmac.new(
-        SERVER_MASTER_SECRET.encode(),
-        payload.encode(),
-        hashlib.sha256
-    ).hexdigest()
-
-    if not hmac.compare_digest(expected_sig, signature):
-        return None
-
-    if time.time() > expires:
-        ACTIVE_SESSIONS.pop(token, None)
-        return None
-
-    session = ACTIVE_SESSIONS.get(token)
-    if not session:
-        return None
-
-    if session.get("ip") != ip:
-        return None
-    if session.get("deviceId") != device_id:
-        return None
-
-    if consume:
-        if token in USED_TOKENS:
-            return None
-        USED_TOKENS.add(token)
-
-    return session
-
-
-# ============================================================
-# 🛡️ RATE LIMITING + AUTO-BLOCK
-# ============================================================
-def is_blocked(key: str) -> bool:
-    unblock_at = BLOCKED_KEYS.get(key)
-    if unblock_at is None:
-        return False
-    if time.time() > unblock_at:
-        del BLOCKED_KEYS[key]
-        return False
-    return True
-
-
-def check_rate_limit(key: str):
-    if is_blocked(key):
-        remaining = int(BLOCKED_KEYS[key] - time.time())
-        raise HTTPException(
-            status_code=429,
-            detail=f"Key blocked for {remaining}s due to abuse."
-        )
-
-    now = time.time()
-    REQUEST_LOG[key] = [t for t in REQUEST_LOG[key] if now - t < 60]
-
-    if len(REQUEST_LOG[key]) >= RATE_LIMIT_PER_MIN:
-        BLOCKED_KEYS[key] = now + BLOCK_DURATION_SEC
-        raise HTTPException(
-            status_code=429,
-            detail=f"Rate limit exceeded. Blocked for {BLOCK_DURATION_SEC}s."
-        )
-
-    REQUEST_LOG[key].append(now)
-
-
-# ============================================================
-# 🛡️ ORIGIN VALIDATION
-# ============================================================
-def validate_origin(request: Request):
-    origin = request.headers.get("Origin", "")
-    referer = request.headers.get("Referer", "")
-
-    if origin and origin not in ALLOWED_ORIGINS:
-        raise HTTPException(status_code=403, detail="Unauthorized origin")
-
-    if not origin and referer:
-        if not any(o in referer for o in ALLOWED_ORIGINS):
-            raise HTTPException(status_code=403, detail="Unauthorized referer")
-
-    return True
-
-
-def validate_app_signature(request: Request):
-    if not REQUIRE_APP_SIGNATURE:
-        return
-    if not ALLOWED_APP_SIGNATURES:
-        return
-    app_sig = request.headers.get("X-App-Signature", "").strip()
-    if app_sig not in ALLOWED_APP_SIGNATURES:
-        raise HTTPException(status_code=403, detail="Unauthorized app")
-
-
-# ============================================================
-# ✍️ PREDICTION HMAC SIGNING
-# ============================================================
-def sign_prediction(period: str, number: int, bigsmall: str, confidence: float) -> str:
-    payload = f"{period}|{number}|{bigsmall}|{confidence}"
-    return hmac.new(
-        APP_VERIFY_SECRET.encode(),
-        payload.encode(),
-        hashlib.sha256
-    ).hexdigest()
-
-
-def get_window_nonce() -> str:
-    window = int(time.time()) // 60
-    return hashlib.sha256(
-        f"{window}|{SERVER_MASTER_SECRET}".encode()
-    ).hexdigest()[:16]
-
-
-# ============================================================
-# 🗄️ PREDICTION CACHE
+# 🗄️ PREDICTION CACHE — TTL 35 SECONDS (FIX #3)
 # ============================================================
 PREDICTION_CACHE: Dict[str, dict] = {}
 MAX_CACHE_SIZE = 200
+CACHE_TTL_SEC = 35  # ✅ was 55 — now strictly 35 sec
 
 
 def _purge_expired_cache():
+    """Remove entries older than CACHE_TTL_SEC."""
     now_ms = int(time.time() * 1000)
     expired = [
         k for k, v in PREDICTION_CACHE.items()
-        if (now_ms - v.get("_createdAt", 0)) / 1000 >= PREDICTION_TTL_SEC
+        if (now_ms - v.get("_createdAt", 0)) / 1000 >= CACHE_TTL_SEC
     ]
     for k in expired:
         PREDICTION_CACHE.pop(k, None)
 
 
 def get_cached_prediction(period: str):
+    """Return cached prediction ONLY if within TTL."""
     entry = PREDICTION_CACHE.get(period)
     if entry is None:
         return None
     age_sec = (time.time() * 1000 - entry.get("_createdAt", 0)) / 1000
-    if age_sec >= PREDICTION_TTL_SEC:
+    if age_sec >= CACHE_TTL_SEC:
         PREDICTION_CACHE.pop(period, None)
         return None
     return entry
 
 
 def save_prediction_to_cache(period: str, data: dict):
+    """Save with `_createdAt` and purge any OTHER period keys (FIX #3)."""
+    # ✅ Purge all older periods — only the current period should ever be cached
     for k in list(PREDICTION_CACHE.keys()):
         if k != period:
             PREDICTION_CACHE.pop(k, None)
+
     if len(PREDICTION_CACHE) >= MAX_CACHE_SIZE:
         PREDICTION_CACHE.clear()
+
     data["_createdAt"] = int(time.time() * 1000)
     PREDICTION_CACHE[period] = data
 
@@ -356,11 +124,11 @@ def save_prediction_to_cache(period: str, data: dict):
 # ============================================================
 def get_ist_time():
     now = datetime.now(IST)
-    total = now.hour * 3600 + now.minute * 60 + now.second
+    total_seconds = now.hour * 3600 + now.minute * 60 + now.second
     return {
         "year": now.year, "month": now.month, "day": now.day,
         "hour": now.hour, "minute": now.minute, "second": now.second,
-        "total_seconds": total
+        "total_seconds": total_seconds
     }
 
 
@@ -373,11 +141,12 @@ def get_current_period():
 
 def get_remaining_seconds():
     t = get_ist_time()
-    return 60 - (t["total_seconds"] % 60)
+    elapsed = t["total_seconds"] % 60
+    return 60 - elapsed
 
 
 # ============================================================
-# 🌐 LIVE HISTORY FETCH
+# 🌐 LIVE HISTORY FETCH — WITH RETRIES + BACKUP (FIX #4)
 # ============================================================
 def _http_get_json(url: str, timeout: int = 8):
     req = urllib.request.Request(
@@ -392,36 +161,50 @@ def _http_get_json(url: str, timeout: int = 8):
         return json.loads(resp.read().decode("utf-8"))
 
 
-def _extract_list(raw) -> List[dict]:
-    if not isinstance(raw, dict):
-        return []
-    data = raw.get("data")
-    if isinstance(data, dict) and isinstance(data.get("list"), list):
-        return data["list"]
-    if isinstance(raw.get("list"), list):
-        return raw["list"]
-    if isinstance(raw, list):
-        return raw
-    return []
-
-
 def fetch_history(retries: int = 2):
+    """
+    Try primary endpoint, then backup.
+    Returns normalized dict: {"data": {"list": [...]}}.
+    """
     last_err = None
     for api in HISTORY_APIS:
         for attempt in range(retries + 1):
             try:
                 raw = _http_get_json(api, timeout=6)
+                # Normalize: the AR-Lottery API and backup may have different shapes.
                 lst = _extract_list(raw)
                 if lst:
                     return {"code": 0, "msg": "ok", "data": {"list": lst}, "_src": api}
             except Exception as e:
                 last_err = e
                 time.sleep(0.25)
+        # try next API after exhausting retries
     return {"code": -1, "msg": str(last_err or "all endpoints failed"),
             "data": {"list": []}, "_src": None}
 
 
+def _extract_list(raw) -> List[dict]:
+    """Handle multiple response shapes from different endpoints."""
+    if not isinstance(raw, dict):
+        return []
+    # Shape A: {"data": {"list": [...]}}
+    data = raw.get("data")
+    if isinstance(data, dict) and isinstance(data.get("list"), list):
+        return data["list"]
+    # Shape B: {"list": [...]}
+    if isinstance(raw.get("list"), list):
+        return raw["list"]
+    # Shape C: top-level list
+    if isinstance(raw, list):
+        return raw
+    return []
+
+
 def get_latest_draw():
+    """
+    Fetch the latest COMPLETED draw.
+    Returns: (issue_str, number_int) or (None, None) on failure.
+    """
     data = fetch_history()
     lst = data.get("data", {}).get("list", []) or []
     if not lst:
@@ -439,6 +222,9 @@ def get_latest_draw():
 
 
 def fetch_live_period():
+    """
+    FIX #1: Always compute strictly NEXT period from latest COMPLETED draw.
+    """
     issue, _ = get_latest_draw()
     if issue:
         try:
@@ -458,44 +244,65 @@ def fetch_live_period():
 
 
 # ============================================================
-# 🎯 ANTI-ECHO NUMBER PICKER
+# 🎯 ANTI-ECHO NUMBER PICKER (FIX #2)
 # ============================================================
 def _pick_anti_echo_number(suggested: int, big_small: str, last_number: Optional[int]) -> int:
+    """
+    Ensure predicted number NEVER equals last_number.
+    Also ensure it belongs to the correct BIG/SMALL bucket.
+    """
     big_set = [5, 6, 7, 8, 9]
     small_set = [0, 1, 2, 3, 4]
     pool = big_set if big_small == "BIG" else small_set
 
+    # If suggested is valid, in pool and not equal to last_number → keep it
     if isinstance(suggested, int) and suggested in pool and suggested != last_number:
         return suggested
 
-    candidates = [n for n in pool if n != last_number] or pool
+    # Otherwise, choose a candidate from pool that is != last_number
+    candidates = [n for n in pool if n != last_number]
+    if not candidates:
+        # Should never happen (pool has 5 items, last_number removes at most 1)
+        candidates = pool
     return random.choice(candidates)
 
 
 def _realistic_confidence(raw_conf, has_live_data: bool) -> float:
+    """
+    FIX #4: Realistic confidence 92.5 – 98.8%. Never 50% fallback.
+    """
     try:
         c = float(raw_conf)
     except (ValueError, TypeError):
         c = None
 
     if not has_live_data:
+        # We still return a credible value; no more 50% fallback
         c = 92.5 + random.random() * 3.0
     elif c is None or c < 90:
-        c = 92.5 + random.random() * 6.3
+        c = 92.5 + random.random() * 6.3  # 92.5 – 98.8
     else:
         c = max(92.5, min(98.8, c))
     return round(c, 1)
 
 
 # ============================================================
-# 🎯 PREDICTION GENERATOR
+# 🎯 PREDICTION GENERATOR — FULL PIPELINE WITH ALL FIXES
 # ============================================================
 def generate_prediction(period: Optional[str] = None,
                         game_id: str = "wingo_1min",
                         use_cache: bool = True):
+    """
+    FIX #1: period = latest_completed + 1  (strict)
+    FIX #2: number != last winning number   (strict)
+    FIX #3: cache TTL 35s, purge other periods
+    FIX #4: realistic confidence, retries
+    """
+    # ---------- 1. Resolve latest completed draw ----------
     latest_issue, last_number = get_latest_draw()
     has_live_data = latest_issue is not None
 
+    # ---------- 2. Determine the NEXT period strictly ----------
     if period is not None:
         target_period = str(period)
     elif latest_issue is not None:
@@ -503,6 +310,7 @@ def generate_prediction(period: Optional[str] = None,
     else:
         target_period = get_current_period()
 
+    # ---------- 3. Cache check (TTL 35s) ----------
     if use_cache:
         cached = get_cached_prediction(target_period)
         if cached is not None:
@@ -511,6 +319,7 @@ def generate_prediction(period: Optional[str] = None,
             out["fromCache"] = True
             return out
 
+    # ---------- 4. Run AI engine ----------
     try:
         result = sddgamer263_predict(
             current_number=(last_number if last_number is not None else 0),
@@ -534,13 +343,17 @@ def generate_prediction(period: Optional[str] = None,
         big_small = "BIG" if (last_number or 0) >= 5 else "SMALL"
 
     suggested = result.get("prediction", last_number if last_number is not None else 0)
+
+    # ---------- 5. Anti-echo enforcement (FIX #2) ----------
     final_number = _pick_anti_echo_number(suggested, big_small, last_number)
 
+    # Re-verify bucket consistency after anti-echo
     if big_small == "BIG" and final_number not in (5, 6, 7, 8, 9):
         final_number = _pick_anti_echo_number(7, "BIG", last_number)
     if big_small == "SMALL" and final_number not in (0, 1, 2, 3, 4):
         final_number = _pick_anti_echo_number(2, "SMALL", last_number)
 
+    # ---------- 6. Realistic confidence (FIX #4) ----------
     confidence = _realistic_confidence(result.get("confidence"), has_live_data)
 
     prediction = {
@@ -549,7 +362,7 @@ def generate_prediction(period: Optional[str] = None,
         "mode": "1m",
         "bigSmallResult": big_small,
         "numberResult": final_number,
-        "numbers": [final_number],
+        "numbers": [final_number],  # ✅ exactly one number, consistent
         "confidence": confidence,
         "patternName": "SDD AI MATRIX v2026",
         "steps": result.get("steps", []),
@@ -608,7 +421,6 @@ def get_prediction_images(prediction):
 def validate_key_or_raise(key: str):
     if not key:
         raise HTTPException(status_code=400, detail="Key required")
-    check_rate_limit(key)
     status = check_key_active(key)
     if not status["active"]:
         raise HTTPException(status_code=403, detail=status["reason"])
@@ -622,29 +434,18 @@ def check_server_online_or_raise():
     return status
 
 
-def _get_client_ip(request: Request) -> str:
-    xff = request.headers.get("X-Forwarded-For")
-    if xff:
-        return xff.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
-
-
 # ============================================================
 # 🚀 PUBLIC ENDPOINTS
 # ============================================================
 @app.get("/")
 def root():
     _purge_expired_cache()
-    _cleanup_sessions()
     return {
         "status": "online",
         "mode": "wingo-1m",
-        "version": "8.0.0",
+        "version": "7.0.0",
         "engine": "SDD AI MATRIX v2026",
-        "engineLoaded": ENGINE_AVAILABLE,
-        "security": "ULTRA",
         "cachedPeriods": len(PREDICTION_CACHE),
-        "activeSessions": len(ACTIVE_SESSIONS),
     }
 
 
@@ -664,13 +465,33 @@ def health():
 
 
 # ============================================================
-# 🔑 AUTH LOGIN
+# 🌐 PUBLIC PREDICTION (No Key Required) — CLEAN JSON
+# ============================================================
+@app.get("/public/predict")
+def public_predict():
+    """Public prediction — strictly next period, anti-echo, realistic confidence."""
+    check_server_online_or_raise()
+    pred = generate_prediction()
+    images = get_prediction_images(pred)
+    return {
+        "prediction": pred["bigSmallResult"],
+        "period": pred["period"],
+        "number": pred["numberResult"],
+        "numbers": [pred["numberResult"]],
+        "confidence": pred["confidence"],
+        "patternName": "SDD AI MATRIX v2026",
+        "bigSmallImage": images["bigSmallImage"],
+        "numberImage": images["numberImage"],
+        "timestamp": int(time.time() * 1000),
+        "fromCache": pred.get("fromCache", False),
+    }
+
+
+# ============================================================
+# 🔑 KEY AUTH ENDPOINTS
 # ============================================================
 @app.post("/auth/login")
 async def auth_login(request: Request):
-    validate_origin(request)
-    validate_app_signature(request)
-
     try:
         body = await request.json()
     except Exception:
@@ -684,26 +505,15 @@ async def auth_login(request: Request):
     if not srv["online"]:
         raise HTTPException(status_code=503, detail=srv["message"])
 
-    check_rate_limit(key)
-
     status = check_key_active(key)
     if not status["active"]:
         raise HTTPException(status_code=403, detail=status["reason"])
 
     data = status.get("data") or {}
-
-    ip = _get_client_ip(request)
-    device_id = request.headers.get("X-Device-Id", "web-" + ip)
-
-    session_token = generate_session_token(key, ip, device_id)
-
     return {
         "success": True,
         "message": "Login successful",
         "key": key,
-        "sessionToken": session_token,
-        "expiresIn": SESSION_TTL_SEC,
-        "windowNonce": get_window_nonce(),
         "balance": float(data.get("balance", 0)),
         "expiry": data.get("expiry", 0),
         "createdAt": data.get("createdAt", 0),
@@ -714,7 +524,11 @@ async def auth_login(request: Request):
 def auth_check(key: str = Query(...)):
     srv = get_server_status()
     if not srv["online"]:
-        return {"active": False, "serverOnline": False, "message": srv["message"]}
+        return {
+            "active": False,
+            "serverOnline": False,
+            "message": srv["message"],
+        }
 
     status = check_key_active(key)
     data = status.get("data") or {}
@@ -728,44 +542,34 @@ def auth_check(key: str = Query(...)):
 
 
 # ============================================================
-# 🎯 SECURE PREDICTION
+# 🎯 PREDICTION ENDPOINTS (Key Required)
 # ============================================================
+@app.get("/period")
+def period_info(key: str = Query(...)):
+    validate_key_or_raise(key)
+    live = fetch_live_period()
+    return {
+        "period": live["period"],
+        "remainingSeconds": live["remaining_seconds"],
+        "source": live["source"],
+    }
+
+
+@app.get("/history")
+def history(key: str = Query(...)):
+    validate_key_or_raise(key)
+    data = fetch_history()
+    lst = data.get("data", {}).get("list", [])[:100]
+    return {"count": len(lst), "results": lst}
+
+
 @app.get("/predict")
-def predict(
-    request: Request,
-    period: Optional[str] = Query(default=None),
-    session: str = Query(...),
-):
-    validate_origin(request)
-    validate_app_signature(request)
-
-    ip = _get_client_ip(request)
-    device_id = request.headers.get("X-Device-Id", "web-" + ip)
-
-    session_data = verify_session_token(session, ip, device_id, consume=True)
-    if not session_data:
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid, expired, or already-used session. Please login again."
-        )
-
-    key = session_data["key"]
-
-    status = check_key_active(key)
-    if not status["active"]:
-        raise HTTPException(status_code=403, detail=status["reason"])
-
+def predict(period: Optional[str] = Query(default=None), key: str = Query(...)):
+    validate_key_or_raise(key)
     check_server_online_or_raise()
 
     pred = generate_prediction(period=period)
     images = get_prediction_images(pred)
-
-    signature = sign_prediction(
-        pred["period"],
-        pred["numberResult"],
-        pred["bigSmallResult"],
-        pred["confidence"]
-    )
 
     return {
         "prediction": pred["bigSmallResult"],
@@ -778,54 +582,46 @@ def predict(
         "source": pred.get("source", "naveen-ai"),
         "bigSmallImage": images["bigSmallImage"],
         "numberImage": images["numberImage"],
-        "signature": signature,
-        "windowNonce": get_window_nonce(),
         "timestamp": pred["timestamp"],
         "fromCache": pred.get("fromCache", False),
+        "steps": pred.get("steps", []),
     }
 
 
-# ============================================================
-# 📊 PERIOD INFO
-# ============================================================
-@app.get("/period")
-def period_info(request: Request, session: str = Query(...)):
-    validate_origin(request)
-    validate_app_signature(request)
-
-    ip = _get_client_ip(request)
-    device_id = request.headers.get("X-Device-Id", "web-" + ip)
-
-    session_data = verify_session_token(session, ip, device_id, consume=False)
-    if not session_data:
-        raise HTTPException(status_code=401, detail="Invalid session")
+@app.get("/predict-full")
+def predict_full(key: str = Query(...)):
+    validate_key_or_raise(key)
+    check_server_online_or_raise()
 
     live = fetch_live_period()
+    pred = generate_prediction(period=live["period"])
+    images = get_prediction_images(pred)
+
+    history_data = fetch_history()
+    last10 = history_data.get("data", {}).get("list", [])[:10]
+
     return {
-        "period": live["period"],
-        "remainingSeconds": live["remaining_seconds"],
-        "source": live["source"],
+        "prediction": {
+            "bigSmall": pred["bigSmallResult"],
+            "number": pred["numberResult"],
+            "numbers": [pred["numberResult"]],
+            "confidence": pred["confidence"],
+            "period": pred["period"],
+            "patternName": pred["patternName"],
+            "source": pred.get("source", "naveen-ai"),
+            "bigSmallImage": images["bigSmallImage"],
+            "numberImage": images["numberImage"],
+            "fromCache": pred.get("fromCache", False),
+            "steps": pred.get("steps", []),
+        },
+        "live": {
+            "period": live["period"],
+            "remainingSeconds": live["remaining_seconds"],
+            "source": live["source"],
+        },
+        "history": last10,
+        "timestamp": pred["timestamp"],
     }
-
-
-# ============================================================
-# 📜 HISTORY
-# ============================================================
-@app.get("/history")
-def history(request: Request, session: str = Query(...)):
-    validate_origin(request)
-    validate_app_signature(request)
-
-    ip = _get_client_ip(request)
-    device_id = request.headers.get("X-Device-Id", "web-" + ip)
-
-    session_data = verify_session_token(session, ip, device_id, consume=False)
-    if not session_data:
-        raise HTTPException(status_code=401, detail="Invalid session")
-
-    data = fetch_history()
-    lst = data.get("data", {}).get("list", [])[:100]
-    return {"count": len(lst), "results": lst}
 
 
 # ============================================================
@@ -912,8 +708,7 @@ async def admin_create_key(request: Request):
 
     key = (body.get("key") or "").strip()
     if not key:
-        key = "MAXMOD" + "".join(random.choices(
-            "ABCDEFGHJKLMNPQRSTUVWXYZ23456789", k=10))
+        key = "MAXMOD" + "".join(random.choices("ABCDEFGHJKLMNPQRSTUVWXYZ23456789", k=10))
 
     duration_days = int(body.get("durationDays", 30))
     balance = float(body.get("balance", 0))
@@ -1010,8 +805,7 @@ async def admin_server_toggle(request: Request):
     from firebase_config import _rest_put
     result = _rest_put(
         "server_status",
-        {"online": online, "message": message,
-         "updatedAt": int(time.time() * 1000)},
+        {"online": online, "message": message, "updatedAt": int(time.time() * 1000)},
     )
     if result is None:
         raise HTTPException(status_code=500, detail="Failed to update server status")
@@ -1108,43 +902,7 @@ def admin_stats(password: str = Query(...)):
             "accepted": accepted_wds,
             "rejected": rejected_wds,
         },
-        "security": {
-            "activeSessions": len(ACTIVE_SESSIONS),
-            "usedTokens": len(USED_TOKENS),
-            "blockedKeys": len(BLOCKED_KEYS),
-        },
     }
-
-
-# ============================================================
-# 🧹 SECURITY MANAGEMENT
-# ============================================================
-@app.get("/admin/security/sessions")
-def admin_sessions(password: str = Query(...)):
-    _check_admin(password)
-    _cleanup_sessions()
-    return {
-        "activeSessions": len(ACTIVE_SESSIONS),
-        "usedTokens": len(USED_TOKENS),
-        "blockedKeys": list(BLOCKED_KEYS.keys()),
-    }
-
-
-@app.get("/admin/security/unblock")
-def admin_unblock_key(password: str = Query(...), key: str = Query(...)):
-    _check_admin(password)
-    if key in BLOCKED_KEYS:
-        del BLOCKED_KEYS[key]
-    REQUEST_LOG.pop(key, None)
-    return {"success": True, "message": f"Key {key} unblocked"}
-
-
-@app.get("/admin/security/clear-sessions")
-def admin_clear_sessions(password: str = Query(...)):
-    _check_admin(password)
-    ACTIVE_SESSIONS.clear()
-    USED_TOKENS.clear()
-    return {"success": True, "message": "All sessions cleared"}
 
 
 # ============================================================
@@ -1157,7 +915,7 @@ def cache_info(password: str = Query(...)):
     return {
         "cachedPeriods": len(PREDICTION_CACHE),
         "maxSize": MAX_CACHE_SIZE,
-        "ttlSeconds": PREDICTION_TTL_SEC,
+        "ttlSeconds": CACHE_TTL_SEC,
         "periods": list(PREDICTION_CACHE.keys()),
     }
 
