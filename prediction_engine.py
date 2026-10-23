@@ -1,10 +1,6 @@
 # ============================================================
-#  UPE-X — ULTIMATE PREDICTION ENGINE (Final)
-#  MODE SWITCHING: Loss pe mode toggle (NORMAL ↔ OPPOSITE)
-#    - NORMAL mode   → logic ka prediction as-is
-#    - OPPOSITE mode → logic ka opposite
-#    - Win  → mode continue
-#    - Loss → mode toggle (switch)
+#  UPE-X — ULTIMATE PREDICTION ENGINE (100% Merged) — INVERTED
+#  Display output = OPPOSITE of logic signal
 # ============================================================
 
 import math
@@ -274,32 +270,7 @@ def v12_predict(sides, nums) -> dict:
 
 
 # ============================================================
-# §6.5 MODE STATE — LOSS-ACTIVATED INVERSION
-# ============================================================
-MODE_STATE = {
-    "mode": "NORMAL",                 # "NORMAL" | "OPPOSITE"
-    "consecutiveLosses": 0,
-    "lastDisplayedPrediction": None,  # "BIG" | "SMALL"
-    "lastLogicSignal": None,          # "BIG" | "SMALL"
-    "lastActualSide": None,           # "B" | "S"
-    "lastMode": "NORMAL",             # mode jab prediction di thi
-    "history": [],                    # audit log
-}
-
-
-def reset_mode_state():
-    """Manual reset — useful for tests or when history changes drastically."""
-    MODE_STATE["mode"] = "NORMAL"
-    MODE_STATE["consecutiveLosses"] = 0
-    MODE_STATE["lastDisplayedPrediction"] = None
-    MODE_STATE["lastLogicSignal"] = None
-    MODE_STATE["lastActualSide"] = None
-    MODE_STATE["lastMode"] = "NORMAL"
-    MODE_STATE["history"] = []
-
-
-# ============================================================
-# §7. MODE AI (internal for rafsan)
+# §7. MODE AI
 # ============================================================
 class ModeAI:
     def __init__(self):
@@ -1132,31 +1103,26 @@ def predict_number_final(numbers, sides, target_side) -> dict:
 
 
 # ============================================================
-# §17. THE SINGLE PIPELINE — UPE-X
+# §17. THE SINGLE PIPELINE — UPE-X (INVERTED OUTPUT)
 # ============================================================
 def _finalize(signal, confidence, stage, pattern_name, numbers, sides, extras=None):
     """
-    MODE-AWARE FINALIZER:
-      - NORMAL mode   → display = logic signal (as-is)
-      - OPPOSITE mode → display = flip(logic signal)
+    INVERTED FINALIZER:
+    - `signal` = logic ka original decision (B/S)
+    - Display output = OPPOSITE of logic signal
+    - Number pool, titanium color, target cluster — sab display signal ke hisaab se
     """
     extras = extras or {}
 
-    logic_signal = signal
-    current_mode = MODE_STATE["mode"]
+    # ── INVERSION LAYER ──
+    logic_signal = signal                 # preserve for diagnostics
+    display_signal = flip(signal)         # OPPOSITE for user display
 
-    if current_mode == "OPPOSITE":
-        display_signal = flip(signal)
-    else:
-        display_signal = signal
-
+    # Number predict display signal ke pool se
     num = predict_number_final(numbers, sides, display_signal)
-    titanium = goku_titanium(numbers, "BIG" if display_signal == "B" else "SMALL")
 
-    # Record for next loss detection
-    MODE_STATE["lastDisplayedPrediction"] = "BIG" if display_signal == "B" else "SMALL"
-    MODE_STATE["lastLogicSignal"] = "BIG" if logic_signal == "B" else "SMALL"
-    MODE_STATE["lastMode"] = current_mode
+    # Titanium bhi display signal ke hisaab se
+    titanium = goku_titanium(numbers, "BIG" if display_signal == "B" else "SMALL")
 
     return {
         "success": True,
@@ -1168,11 +1134,9 @@ def _finalize(signal, confidence, stage, pattern_name, numbers, sides, extras=No
         "pattern": pattern_name,
         "colorPrediction": titanium["dominantColor"],
         "targetCluster": titanium["targetNumberCluster"],
-        # Diagnostics
+        # ── Diagnostics ──
         "logicSignal": "BIG" if logic_signal == "B" else "SMALL",
-        "mode": current_mode,
-        "inverted": (current_mode == "OPPOSITE"),
-        "consecutiveLosses": MODE_STATE["consecutiveLosses"],
+        "inverted": True,
         "diagnostics": extras,
     }
 
@@ -1181,6 +1145,7 @@ def predict_unified(history, opts=None) -> dict:
     """
     @param history: list of {"issueNumber": str|int, "number": int} — newest-first, >= 5 rows
     @param opts: dict { "weights"?: dict, "adminOverride"?: str, "fetchNum"?: int }
+    @returns unified prediction (INVERTED — opposite of logic)
     """
     opts = opts or {}
     if not isinstance(history, list) or len(history) < 5:
@@ -1228,7 +1193,7 @@ def predict_unified(history, opts=None) -> dict:
         return _finalize(signal, 99, "V12_FORCED", v12["patternName"],
                          numbers, sides, extras={"v12": v12})
 
-    # ── STAGE 4: RAFSAN ──
+    # ── STAGE 4: RAFSAN 15-model ──
     if not DEEP.ready:
         deep_train(history)
     rafsan = rafsan15_model(history)
@@ -1241,7 +1206,7 @@ def predict_unified(history, opts=None) -> dict:
     # ── STAGE 5: WEBC0DC 7-layer ──
     webc = webc0dc7_layer(numbers, sides, weights)
 
-    # ── STAGE 6: TUSHAR ──
+    # ── STAGE 6: TUSHAR 10/10 ──
     tushar = tushar_10of10(numbers, sides, fetch_num)
 
     # ── STAGE 7: DRAGON + ZIGZAG ──
@@ -1345,49 +1310,14 @@ def predict_unified(history, opts=None) -> dict:
 
 
 # ============================================================
-# §18. FEEDBACK — LOSS-ACTIVATED MODE TOGGLE
+# §18. FEEDBACK
 # ============================================================
 def record_outcome(actual_number, opts=None) -> Dict[str, float]:
-    """
-    Mode switching rules:
-      - WIN  → mode continue (unchanged)
-      - LOSS → mode toggle (NORMAL ↔ OPPOSITE)
-    """
     opts = opts or {}
     actual_side = to_side(actual_number)
-    actual_big_small = "BIG" if actual_side == "B" else "SMALL"
-
-    # ── MODE STATE UPDATE ──
-    last_pred = MODE_STATE["lastDisplayedPrediction"]
-    last_mode = MODE_STATE["lastMode"]
-
-    if last_pred is not None:
-        win = (last_pred == actual_big_small)
-
-        MODE_STATE["history"].insert(0, {
-            "mode": last_mode,
-            "predicted": last_pred,
-            "actual": actual_big_small,
-            "win": win,
-            "logicSignal": MODE_STATE["lastLogicSignal"],
-        })
-        if len(MODE_STATE["history"]) > 50:
-            MODE_STATE["history"].pop()
-
-        if win:
-            MODE_STATE["consecutiveLosses"] = 0
-            # WIN → mode continue
-        else:
-            MODE_STATE["consecutiveLosses"] += 1
-            # LOSS → toggle mode
-            MODE_STATE["mode"] = "OPPOSITE" if MODE_STATE["mode"] == "NORMAL" else "NORMAL"
-
-    MODE_STATE["lastActualSide"] = actual_side
-
-    # ── Internal feedback (MODE_AI, V12, weights) ──
     layers = opts.get("layers") or []
     MODE_AI.record_result(
-        actual_big_small,
+        "BIG" if actual_side == "B" else "SMALL",
         opts.get("aiRawPrediction") or ("SMALL" if actual_side == "B" else "BIG"),
         opts.get("wasOpposite", False),
     )
@@ -1398,7 +1328,6 @@ def record_outcome(actual_number, opts=None) -> Dict[str, float]:
         else:
             V12_STATE["consecutiveLoss"] += 1
     V12_STATE["lastPredictedSize"] = actual_side
-
     return update_weights(opts.get("weights") or default_weights(), layers, actual_side)
 
 
@@ -1406,7 +1335,10 @@ def record_outcome(actual_number, opts=None) -> Dict[str, float]:
 # §19. COMPAT ALIAS
 # ============================================================
 def sddgamer263_predict(history, opts=None):
-    """Backwards-compatible wrapper. Accepts list of dicts OR list of ints."""
+    """
+    Backwards-compatible wrapper. Accepts list of dicts OR list of ints.
+    Returns INVERTED prediction (opposite of logic).
+    """
     if history and isinstance(history[0], (int, float)):
         history = [
             {"issueNumber": f"auto{i}", "number": int(n)}
@@ -1420,7 +1352,7 @@ def sddgamer263_predict(history, opts=None):
 # ============================================================
 __all__ = [
     "predict_unified", "sddgamer263_predict", "record_outcome", "deep_train",
-    "DEEP", "MODE_AI", "V12_STATE", "MODE_STATE", "reset_mode_state",
+    "DEEP", "MODE_AI", "V12_STATE",
     "default_weights", "update_weights",
     "to_side", "flip", "to_color", "NUMBER_MAP",
 ]
@@ -1431,7 +1363,6 @@ __all__ = [
 # ============================================================
 if __name__ == "__main__":
     import json
-
     history = [
         {"issueNumber": "202601011200", "number": 7},
         {"issueNumber": "202601011159", "number": 3},
@@ -1444,42 +1375,19 @@ if __name__ == "__main__":
         {"issueNumber": "202601011152", "number": 0},
         {"issueNumber": "202601011151", "number": 4},
     ]
+    out = predict_unified(history)
+    print(json.dumps({k: v for k, v in out.items() if k != "diagnostics"}, indent=2))
 
-    print("=" * 65)
-    print(" DEMO — Loss-Activated Mode Switching")
-    print("=" * 65)
-    print(f"Initial mode: {MODE_STATE['mode']}")
+    # Verify inversion
+    assert out["inverted"] is True
+    assert out["prediction"] != out["logicSignal"], \
+        f"Inversion failed: display={out['prediction']}, logic={out['logicSignal']}"
+    print(f"\n✅ Inversion verified: Logic={out['logicSignal']} → Display={out['prediction']}")
+    print(f"✅ Number pool correctly flipped: {out['predictedNumber']} "
+          f"({'BIG' if out['predictedNumber'] >= 5 else 'SMALL'} pool)")
 
-    # Simulated actual results sequence (to prove mode switching)
-    simulated_actuals = [3, 8, 1, 7, 9, 2, 6, 4, 0, 5]
-
-    for i, actual_num in enumerate(simulated_actuals):
-        out = predict_unified(history)
-        actual_side = "BIG" if actual_num >= 5 else "SMALL"
-
-        print(f"\n--- Round {i+1} ---")
-        print(f"Mode        : {out['mode']}")
-        print(f"Logic       : {out['logicSignal']}")
-        print(f"Displayed   : {out['prediction']}   (inverted={out['inverted']})")
-        print(f"Number      : {out['predictedNumber']}")
-        print(f"Actual      : {actual_num} → {actual_side}")
-
-        before_mode = MODE_STATE["mode"]
-        record_outcome(actual_num)
-        after_mode = MODE_STATE["mode"]
-
-        result = "WIN ✅" if out["prediction"] == actual_side else "LOSS ❌"
-        print(f"Result      : {result}")
-        if before_mode != after_mode:
-            print(f"MODE SWITCH : {before_mode} → {after_mode} 🔄")
-        else:
-            print(f"Mode stays  : {after_mode}")
-
-        history.insert(0, {"issueNumber": f"auto{1700000000+i}", "number": actual_num})
-
-    print("\n" + "=" * 65)
-    print(" MODE HISTORY (last 10):")
-    print("=" * 65)
-    for h in MODE_STATE["history"][:10]:
-        icon = "✅" if h["win"] else "❌"
-        print(f"{icon}  mode={h['mode']:9s}  pred={h['predicted']:5s}  actual={h['actual']:5s}")
+    # Alias test
+    out2 = sddgamer263_predict(history)
+    assert out2["success"] is True
+    print(f"✅ sddgamer263_predict alias: {out2['prediction']} "
+          f"(logic was {out2['logicSignal']})")
