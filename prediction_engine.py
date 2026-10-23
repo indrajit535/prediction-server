@@ -1417,3 +1417,5 @@ if __name__ == "__main__":
     out2 = sddgamer263_predict(history)
     assert out2["success"] is True
     print("\n✅ sddgamer263_predict alias works:", out2["prediction"])
+def sddgamer263_predict(history, opts=None):
+    return predict_unified(history, opts)
