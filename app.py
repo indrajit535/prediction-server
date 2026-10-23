@@ -1,12 +1,5 @@
 """
 FastAPI Prediction Server — Wingo 1 Min Mode (v7.0 PRODUCTION)
----------------------------------------------------------------
-✅ FIX 1: Strict next-period prediction (latest completed + 1)
-✅ FIX 2: Anti-echo validation (never repeat last winning number)
-✅ FIX 3: Cache TTL 35s + auto-purge on new period detection
-✅ FIX 4: Realistic confidence (92.5–98.8%), retries, backup endpoint
-✅ Firebase Integration (Key validation, Server status, Withdrawal)
-✅ Admin Panel Control | CORS allow_origins=["*"]
 """
 
 from fastapi import FastAPI, Query, HTTPException, Request
@@ -32,10 +25,8 @@ from firebase_config import (
     init_firebase,
 )
 
-# ✅ NAVEEN AI PREDICTION ENGINE
 from prediction_engine import sddgamer263_predict
 
-# Firebase init on startup
 init_firebase()
 
 app = FastAPI(
@@ -44,7 +35,6 @@ app = FastAPI(
     version="7.0.0"
 )
 
-# CORS — allow all origins
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -53,16 +43,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
-# ============================================================
-# 🔐 ADMIN PASSWORD
-# ============================================================
 ADMIN_PASSWORD = "SDD263@@"
 
-
-# ============================================================
-# 🌐 HISTORY API ENDPOINTS (PRIMARY + BACKUP)
-# ============================================================
 PRIMARY_HISTORY_API = (
     "https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json"
 )
@@ -73,17 +55,12 @@ HISTORY_APIS = [PRIMARY_HISTORY_API, BACKUP_HISTORY_API]
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
-
-# ============================================================
-# 🗄️ PREDICTION CACHE — TTL 35 SECONDS (FIX #3)
-# ============================================================
 PREDICTION_CACHE: Dict[str, dict] = {}
 MAX_CACHE_SIZE = 200
-CACHE_TTL_SEC = 35  # ✅ was 55 — now strictly 35 sec
+CACHE_TTL_SEC = 35
 
 
 def _purge_expired_cache():
-    """Remove entries older than CACHE_TTL_SEC."""
     now_ms = int(time.time() * 1000)
     expired = [
         k for k, v in PREDICTION_CACHE.items()
@@ -94,7 +71,6 @@ def _purge_expired_cache():
 
 
 def get_cached_prediction(period: str):
-    """Return cached prediction ONLY if within TTL."""
     entry = PREDICTION_CACHE.get(period)
     if entry is None:
         return None
@@ -106,22 +82,15 @@ def get_cached_prediction(period: str):
 
 
 def save_prediction_to_cache(period: str, data: dict):
-    """Save with `_createdAt` and purge any OTHER period keys (FIX #3)."""
-    # ✅ Purge all older periods — only the current period should ever be cached
     for k in list(PREDICTION_CACHE.keys()):
         if k != period:
             PREDICTION_CACHE.pop(k, None)
-
     if len(PREDICTION_CACHE) >= MAX_CACHE_SIZE:
         PREDICTION_CACHE.clear()
-
     data["_createdAt"] = int(time.time() * 1000)
     PREDICTION_CACHE[period] = data
 
 
-# ============================================================
-# 🕐 TIME HELPERS
-# ============================================================
 def get_ist_time():
     now = datetime.now(IST)
     total_seconds = now.hour * 3600 + now.minute * 60 + now.second
@@ -145,9 +114,6 @@ def get_remaining_seconds():
     return 60 - elapsed
 
 
-# ============================================================
-# 🌐 LIVE HISTORY FETCH — WITH RETRIES + BACKUP (FIX #4)
-# ============================================================
 def _http_get_json(url: str, timeout: int = 8):
     req = urllib.request.Request(
         url,
@@ -162,49 +128,35 @@ def _http_get_json(url: str, timeout: int = 8):
 
 
 def fetch_history(retries: int = 2):
-    """
-    Try primary endpoint, then backup.
-    Returns normalized dict: {"data": {"list": [...]}}.
-    """
     last_err = None
     for api in HISTORY_APIS:
         for attempt in range(retries + 1):
             try:
                 raw = _http_get_json(api, timeout=6)
-                # Normalize: the AR-Lottery API and backup may have different shapes.
                 lst = _extract_list(raw)
                 if lst:
                     return {"code": 0, "msg": "ok", "data": {"list": lst}, "_src": api}
             except Exception as e:
                 last_err = e
                 time.sleep(0.25)
-        # try next API after exhausting retries
     return {"code": -1, "msg": str(last_err or "all endpoints failed"),
             "data": {"list": []}, "_src": None}
 
 
 def _extract_list(raw) -> List[dict]:
-    """Handle multiple response shapes from different endpoints."""
     if not isinstance(raw, dict):
         return []
-    # Shape A: {"data": {"list": [...]}}
     data = raw.get("data")
     if isinstance(data, dict) and isinstance(data.get("list"), list):
         return data["list"]
-    # Shape B: {"list": [...]}
     if isinstance(raw.get("list"), list):
         return raw["list"]
-    # Shape C: top-level list
     if isinstance(raw, list):
         return raw
     return []
 
 
 def get_latest_draw():
-    """
-    Fetch the latest COMPLETED draw.
-    Returns: (issue_str, number_int) or (None, None) on failure.
-    """
     data = fetch_history()
     lst = data.get("data", {}).get("list", []) or []
     if not lst:
@@ -222,87 +174,50 @@ def get_latest_draw():
 
 
 def fetch_live_period():
-    """
-    FIX #1: Always compute strictly NEXT period from latest COMPLETED draw.
-    """
     issue, _ = get_latest_draw()
     if issue:
         try:
             next_period = str(int(issue) + 1)
         except ValueError:
             next_period = get_current_period()
-        return {
-            "period": next_period,
+        return {"period": next_period,
+                "remaining_seconds": get_remaining_seconds(),
+                "source": "live"}
+    return {"period": get_current_period(),
             "remaining_seconds": get_remaining_seconds(),
-            "source": "live"
-        }
-    return {
-        "period": get_current_period(),
-        "remaining_seconds": get_remaining_seconds(),
-        "source": "local-fallback"
-    }
+            "source": "local-fallback"}
 
 
-# ============================================================
-# 🎯 ANTI-ECHO NUMBER PICKER (FIX #2)
-# ============================================================
 def _pick_anti_echo_number(suggested: int, big_small: str, last_number: Optional[int]) -> int:
-    """
-    Ensure predicted number NEVER equals last_number.
-    Also ensure it belongs to the correct BIG/SMALL bucket.
-    """
     big_set = [5, 6, 7, 8, 9]
     small_set = [0, 1, 2, 3, 4]
     pool = big_set if big_small == "BIG" else small_set
-
-    # If suggested is valid, in pool and not equal to last_number → keep it
     if isinstance(suggested, int) and suggested in pool and suggested != last_number:
         return suggested
-
-    # Otherwise, choose a candidate from pool that is != last_number
-    candidates = [n for n in pool if n != last_number]
-    if not candidates:
-        # Should never happen (pool has 5 items, last_number removes at most 1)
-        candidates = pool
+    candidates = [n for n in pool if n != last_number] or pool
     return random.choice(candidates)
 
 
 def _realistic_confidence(raw_conf, has_live_data: bool) -> float:
-    """
-    FIX #4: Realistic confidence 92.5 – 98.8%. Never 50% fallback.
-    """
     try:
         c = float(raw_conf)
     except (ValueError, TypeError):
         c = None
-
     if not has_live_data:
-        # We still return a credible value; no more 50% fallback
         c = 92.5 + random.random() * 3.0
     elif c is None or c < 90:
-        c = 92.5 + random.random() * 6.3  # 92.5 – 98.8
+        c = 92.5 + random.random() * 6.3
     else:
         c = max(92.5, min(98.8, c))
     return round(c, 1)
 
 
-# ============================================================
-# 🎯 PREDICTION GENERATOR — FULL PIPELINE WITH ALL FIXES
-# ============================================================
 def generate_prediction(period: Optional[str] = None,
                         game_id: str = "wingo_1min",
                         use_cache: bool = True):
-    """
-    FIX #1: period = latest_completed + 1  (strict)
-    FIX #2: number != last winning number   (strict)
-    FIX #3: cache TTL 35s, purge other periods
-    FIX #4: realistic confidence, retries
-    """
-    # ---------- 1. Resolve latest completed draw ----------
     latest_issue, last_number = get_latest_draw()
     has_live_data = latest_issue is not None
 
-    # ---------- 2. Determine the NEXT period strictly ----------
     if period is not None:
         target_period = str(period)
     elif latest_issue is not None:
@@ -310,7 +225,6 @@ def generate_prediction(period: Optional[str] = None,
     else:
         target_period = get_current_period()
 
-    # ---------- 3. Cache check (TTL 35s) ----------
     if use_cache:
         cached = get_cached_prediction(target_period)
         if cached is not None:
@@ -319,7 +233,6 @@ def generate_prediction(period: Optional[str] = None,
             out["fromCache"] = True
             return out
 
-    # ---------- 4. Run AI engine ----------
     try:
         result = sddgamer263_predict(
             current_number=(last_number if last_number is not None else 0),
@@ -343,17 +256,13 @@ def generate_prediction(period: Optional[str] = None,
         big_small = "BIG" if (last_number or 0) >= 5 else "SMALL"
 
     suggested = result.get("prediction", last_number if last_number is not None else 0)
-
-    # ---------- 5. Anti-echo enforcement (FIX #2) ----------
     final_number = _pick_anti_echo_number(suggested, big_small, last_number)
 
-    # Re-verify bucket consistency after anti-echo
     if big_small == "BIG" and final_number not in (5, 6, 7, 8, 9):
         final_number = _pick_anti_echo_number(7, "BIG", last_number)
     if big_small == "SMALL" and final_number not in (0, 1, 2, 3, 4):
         final_number = _pick_anti_echo_number(2, "SMALL", last_number)
 
-    # ---------- 6. Realistic confidence (FIX #4) ----------
     confidence = _realistic_confidence(result.get("confidence"), has_live_data)
 
     prediction = {
@@ -362,7 +271,7 @@ def generate_prediction(period: Optional[str] = None,
         "mode": "1m",
         "bigSmallResult": big_small,
         "numberResult": final_number,
-        "numbers": [final_number],  # ✅ exactly one number, consistent
+        "numbers": [final_number],
         "confidence": confidence,
         "patternName": "SDD AI MATRIX v2026",
         "steps": result.get("steps", []),
@@ -375,13 +284,9 @@ def generate_prediction(period: Optional[str] = None,
 
     if use_cache:
         save_prediction_to_cache(target_period, prediction)
-
     return prediction
 
 
-# ============================================================
-# 🖼️ IMAGE ASSETS
-# ============================================================
 ASSETS = {
     "bigSmall": {
         "BIG":   "https://i.ibb.co/Pb3P55c/1776870190363.png",
@@ -415,9 +320,6 @@ def get_prediction_images(prediction):
     }
 
 
-# ============================================================
-# 🔐 VALIDATION HELPERS
-# ============================================================
 def validate_key_or_raise(key: str):
     if not key:
         raise HTTPException(status_code=400, detail="Key required")
@@ -434,9 +336,6 @@ def check_server_online_or_raise():
     return status
 
 
-# ============================================================
-# 🚀 PUBLIC ENDPOINTS
-# ============================================================
 @app.get("/")
 def root():
     _purge_expired_cache()
@@ -464,12 +363,8 @@ def health():
     return {"status": "ok", "timestamp": int(time.time() * 1000)}
 
 
-# ============================================================
-# 🌐 PUBLIC PREDICTION (No Key Required) — CLEAN JSON
-# ============================================================
 @app.get("/public/predict")
 def public_predict():
-    """Public prediction — strictly next period, anti-echo, realistic confidence."""
     check_server_online_or_raise()
     pred = generate_prediction()
     images = get_prediction_images(pred)
@@ -487,33 +382,24 @@ def public_predict():
     }
 
 
-# ============================================================
-# 🔑 KEY AUTH ENDPOINTS
-# ============================================================
 @app.post("/auth/login")
 async def auth_login(request: Request):
     try:
         body = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
-
     key = (body.get("key") or "").strip()
     if not key:
         raise HTTPException(status_code=400, detail="Key required")
-
     srv = get_server_status()
     if not srv["online"]:
         raise HTTPException(status_code=503, detail=srv["message"])
-
     status = check_key_active(key)
     if not status["active"]:
         raise HTTPException(status_code=403, detail=status["reason"])
-
     data = status.get("data") or {}
     return {
-        "success": True,
-        "message": "Login successful",
-        "key": key,
+        "success": True, "message": "Login successful", "key": key,
         "balance": float(data.get("balance", 0)),
         "expiry": data.get("expiry", 0),
         "createdAt": data.get("createdAt", 0),
@@ -524,35 +410,24 @@ async def auth_login(request: Request):
 def auth_check(key: str = Query(...)):
     srv = get_server_status()
     if not srv["online"]:
-        return {
-            "active": False,
-            "serverOnline": False,
-            "message": srv["message"],
-        }
-
+        return {"active": False, "serverOnline": False, "message": srv["message"]}
     status = check_key_active(key)
     data = status.get("data") or {}
     return {
-        "active": status["active"],
-        "serverOnline": True,
+        "active": status["active"], "serverOnline": True,
         "reason": status["reason"],
         "balance": float(data.get("balance", 0)),
         "expiry": data.get("expiry", 0),
     }
 
 
-# ============================================================
-# 🎯 PREDICTION ENDPOINTS (Key Required)
-# ============================================================
 @app.get("/period")
 def period_info(key: str = Query(...)):
     validate_key_or_raise(key)
     live = fetch_live_period()
-    return {
-        "period": live["period"],
-        "remainingSeconds": live["remaining_seconds"],
-        "source": live["source"],
-    }
+    return {"period": live["period"],
+            "remainingSeconds": live["remaining_seconds"],
+            "source": live["source"]}
 
 
 @app.get("/history")
@@ -567,10 +442,8 @@ def history(key: str = Query(...)):
 def predict(period: Optional[str] = Query(default=None), key: str = Query(...)):
     validate_key_or_raise(key)
     check_server_online_or_raise()
-
     pred = generate_prediction(period=period)
     images = get_prediction_images(pred)
-
     return {
         "prediction": pred["bigSmallResult"],
         "period": pred["period"],
@@ -592,14 +465,11 @@ def predict(period: Optional[str] = Query(default=None), key: str = Query(...)):
 def predict_full(key: str = Query(...)):
     validate_key_or_raise(key)
     check_server_online_or_raise()
-
     live = fetch_live_period()
     pred = generate_prediction(period=live["period"])
     images = get_prediction_images(pred)
-
     history_data = fetch_history()
     last10 = history_data.get("data", {}).get("list", [])[:10]
-
     return {
         "prediction": {
             "bigSmall": pred["bigSmallResult"],
@@ -624,9 +494,6 @@ def predict_full(key: str = Query(...)):
     }
 
 
-# ============================================================
-# 💰 WITHDRAWAL ENDPOINTS
-# ============================================================
 @app.get("/withdrawal/balance")
 def withdrawal_balance(key: str = Query(...)):
     validate_key_or_raise(key)
@@ -639,7 +506,6 @@ async def withdrawal_request(request: Request):
         body = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
-
     key = (body.get("key") or "").strip()
     try:
         amount = float(body.get("amount", 0))
@@ -647,27 +513,18 @@ async def withdrawal_request(request: Request):
         raise HTTPException(status_code=400, detail="Invalid amount")
     method = body.get("method", "UPI")
     account = body.get("account", "")
-
     validate_key_or_raise(key)
     check_server_online_or_raise()
-
     if amount <= 0:
         raise HTTPException(status_code=400, detail="Invalid amount")
-
     balance = get_user_balance(key)
     if amount > balance:
         raise HTTPException(status_code=400, detail="Insufficient balance")
-
     result = create_withdrawal_request(key, amount, method, account)
     if not result["success"]:
         raise HTTPException(status_code=500, detail=result.get("error", "Failed"))
-
-    return {
-        "success": True,
-        "message": "Withdrawal request submitted",
-        "requestId": result["requestId"],
-        "status": "pending",
-    }
+    return {"success": True, "message": "Withdrawal request submitted",
+            "requestId": result["requestId"], "status": "pending"}
 
 
 @app.get("/withdrawal/history")
@@ -676,9 +533,6 @@ def withdrawal_history(key: str = Query(...)):
     return {"requests": get_user_withdrawals(key)}
 
 
-# ============================================================
-# 🛡️ ADMIN ENDPOINTS
-# ============================================================
 def _check_admin(password: str):
     if password != ADMIN_PASSWORD:
         raise HTTPException(status_code=403, detail="Invalid admin password")
@@ -703,32 +557,20 @@ async def admin_create_key(request: Request):
         body = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
-
     _check_admin(body.get("password", ""))
-
     key = (body.get("key") or "").strip()
     if not key:
         key = "MAXMOD" + "".join(random.choices("ABCDEFGHJKLMNPQRSTUVWXYZ23456789", k=10))
-
     duration_days = int(body.get("durationDays", 30))
     balance = float(body.get("balance", 0))
     now_ms = int(time.time() * 1000)
     expiry = now_ms + duration_days * 24 * 60 * 60 * 1000
-
-    data = {
-        "active": True,
-        "deleted": False,
-        "createdAt": now_ms,
-        "expiry": expiry,
-        "durationDays": duration_days,
-        "balance": balance,
-    }
-
+    data = {"active": True, "deleted": False, "createdAt": now_ms,
+            "expiry": expiry, "durationDays": duration_days, "balance": balance}
     from firebase_config import _rest_put
     result = _rest_put(f"keys/{key}", data)
     if result is None:
         raise HTTPException(status_code=500, detail="Failed to create key")
-
     return {"success": True, "key": key, "data": data}
 
 
@@ -738,17 +580,14 @@ async def admin_delete_key(request: Request):
         body = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
-
     _check_admin(body.get("password", ""))
     key = (body.get("key") or "").strip()
     if not key:
         raise HTTPException(status_code=400, detail="Key required")
-
     from firebase_config import _rest_patch
     result = _rest_patch(f"keys/{key}", {"active": False, "deleted": True})
     if result is None:
         raise HTTPException(status_code=500, detail="Failed to delete key")
-
     return {"success": True, "message": f"Key {key} deleted"}
 
 
@@ -758,16 +597,13 @@ async def admin_toggle_key(request: Request):
         body = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
-
     _check_admin(body.get("password", ""))
     key = (body.get("key") or "").strip()
     active = bool(body.get("active", True))
-
     from firebase_config import _rest_patch
     result = _rest_patch(f"keys/{key}", {"active": active})
     if result is None:
         raise HTTPException(status_code=500, detail="Failed to update key")
-
     return {"success": True, "key": key, "active": active}
 
 
@@ -777,15 +613,12 @@ async def admin_update_balance(request: Request):
         body = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
-
     _check_admin(body.get("password", ""))
     key = (body.get("key") or "").strip()
     balance = float(body.get("balance", 0))
-
     ok = update_user_balance(key, balance)
     if not ok:
         raise HTTPException(status_code=500, detail="Failed to update balance")
-
     return {"success": True, "key": key, "balance": balance}
 
 
@@ -795,21 +628,15 @@ async def admin_server_toggle(request: Request):
         body = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
-
     _check_admin(body.get("password", ""))
     online = bool(body.get("online", True))
-    message = body.get(
-        "message", "Server is running" if online else "Server is under maintenance"
-    )
-
+    message = body.get("message", "Server is running" if online else "Server is under maintenance")
     from firebase_config import _rest_put
-    result = _rest_put(
-        "server_status",
-        {"online": online, "message": message, "updatedAt": int(time.time() * 1000)},
-    )
+    result = _rest_put("server_status",
+                       {"online": online, "message": message,
+                        "updatedAt": int(time.time() * 1000)})
     if result is None:
         raise HTTPException(status_code=500, detail="Failed to update server status")
-
     return {"success": True, "online": online, "message": message}
 
 
@@ -829,35 +656,26 @@ async def admin_withdrawal_action(request: Request):
         body = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
-
     _check_admin(body.get("password", ""))
     req_id = (body.get("requestId") or "").strip()
     action = (body.get("action") or "").strip().lower()
-
     if action not in ("accept", "reject"):
         raise HTTPException(status_code=400, detail="Action must be 'accept' or 'reject'")
-
     from firebase_config import _rest_get, _rest_patch
     req = _rest_get(f"withdrawals/{req_id}")
     if not req:
         raise HTTPException(status_code=404, detail="Request not found")
-
     if req.get("status") != "pending":
         raise HTTPException(status_code=400, detail="Request already processed")
-
     new_status = "accepted" if action == "accept" else "rejected"
-    _rest_patch(
-        f"withdrawals/{req_id}",
-        {"status": new_status, "processedAt": int(time.time() * 1000)},
-    )
-
+    _rest_patch(f"withdrawals/{req_id}",
+                {"status": new_status, "processedAt": int(time.time() * 1000)})
     if action == "accept":
         key = req.get("key")
         amount = float(req.get("amount", 0))
         current_balance = get_user_balance(key)
         new_balance = max(0, current_balance - amount)
         update_user_balance(key, new_balance)
-
     return {"success": True, "requestId": req_id, "status": new_status}
 
 
@@ -868,7 +686,6 @@ def admin_stats(password: str = Query(...)):
     keys_data = _rest_get("keys") or {}
     wd_data = _rest_get("withdrawals") or {}
     srv = get_server_status()
-
     total_keys = len(keys_data)
     active_keys = sum(
         1 for v in keys_data.values()
@@ -877,7 +694,6 @@ def admin_stats(password: str = Query(...)):
     total_balance = sum(
         float(v.get("balance", 0)) for v in keys_data.values() if isinstance(v, dict)
     )
-
     pending_wds = sum(
         1 for v in wd_data.values()
         if isinstance(v, dict) and v.get("status") == "pending"
@@ -890,24 +706,15 @@ def admin_stats(password: str = Query(...)):
         1 for v in wd_data.values()
         if isinstance(v, dict) and v.get("status") == "rejected"
     )
-
     return {
-        "totalKeys": total_keys,
-        "activeKeys": active_keys,
-        "totalBalance": total_balance,
-        "serverOnline": srv["online"],
+        "totalKeys": total_keys, "activeKeys": active_keys,
+        "totalBalance": total_balance, "serverOnline": srv["online"],
         "serverMessage": srv["message"],
-        "withdrawals": {
-            "pending": pending_wds,
-            "accepted": accepted_wds,
-            "rejected": rejected_wds,
-        },
+        "withdrawals": {"pending": pending_wds, "accepted": accepted_wds,
+                        "rejected": rejected_wds},
     }
 
 
-# ============================================================
-# 🧹 CACHE MANAGEMENT
-# ============================================================
 @app.get("/cache-info")
 def cache_info(password: str = Query(...)):
     _check_admin(password)
@@ -927,16 +734,10 @@ def cache_clear(password: str = Query(...)):
     return {"status": "cleared"}
 
 
-# ============================================================
-# 🖼️ STATIC PANELS
-# ============================================================
 if os.path.isdir("static"):
     app.mount("/panel", StaticFiles(directory="static", html=True), name="static")
 
 
-# ============================================================
-# 🚀 ENTRY POINT
-# ============================================================
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
