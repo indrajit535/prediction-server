@@ -1,27 +1,24 @@
-"""
-============================================================
- UPE-X — ULTIMATE PREDICTION ENGINE (Python Port of JS)
- 100% Full Integration — All original prediction logic removed.
- Sources ported 1:1:
-   1. RAFSAN BHAI  → aiBrain, 50-pattern, modeAI, 15-model vote
-   2. GOKU MODES   → 500-pattern rulebook, n-gram, Titanium, ZigZag, Dragon, V12
-   3. ANSH BHAI    → TITANIUM combo, special triggers, trend engine
-   4. TUSHAR       → UniversalAIDecoder, 12 formula types, 4000-param search
-   5. apex-engine  → trend(3), pickNumbers, evaluateRound, engine loop
-   6. Replacement  → getPrediction 3:3/dragon/opposite, predictFromHistory
-   7. TRION        → NUMBER_MAP, inversion, NODE_MATRIX, pick4Numbers
-   8. WINGO 20     → calculateBigSmall(20), calculateRedGreen(20)
-   9. WEBC0DC V2   → 7-layer L1..L7 + self-learning updateWeights
-
- ARCHITECTURE: Strict sequential filter pipeline.
- NO VOTING. Each stage either CONFIRMS, OVERRIDES, or DEFERS.
-============================================================
-"""
+# ============================================================
+#  UPE-X — ULTIMATE PREDICTION ENGINE (100% Merged)
+#  Sources (all prediction logic lifted 1:1):
+#    1. RAFSAN BHAI HTML  -> aiBrain, 50-pattern, modeAI, 15-model vote array
+#    2. GOKU MODES        -> 500-pattern rulebook, n-gram, Titanium, ZigZag, Dragon, V12
+#    3. ANSH BHAI         -> TITANIUM combo, special triggers, trend engine
+#    4. TUSHAR            -> UniversalAIDecoder, 12 formula types, 4000-param search
+#    5. apex-engine.js    -> trend(3), pickNumbers, evaluateRound, engine loop
+#    6. Replacement       -> getPrediction 3:3/dragon/opposite, predictFromHistory
+#    7. TRION             -> NUMBER_MAP, inversion, NODE_MATRIX, pick4Numbers
+#    8. WINGO 20-Logic    -> calculateBigSmall(20), calculateRedGreen(20)
+#    9. WEBC0DC V2        -> 7-layer L1..L7 + self-learning updateWeights
+#
+#  ARCHITECTURE: Strict sequential filter pipeline.
+#  NO VOTING. Each stage either CONFIRMS, OVERRIDES, or DEFERS to the next.
+#  ============================================================
 
 import math
 import random
-from typing import Optional, List, Dict, Any, Tuple
-from datetime import datetime, timezone, timedelta
+import time
+from typing import Optional, List, Dict, Any
 
 # ============================================================
 # §0. PRIMITIVES
@@ -49,17 +46,9 @@ def clamp(v, a, b):
 def hash_string(s: str) -> int:
     h = 0
     for ch in s:
-        h = ((h << 5) - h) + ord(ch)
-        # JS bitwise ops coerce to 32-bit signed
-        h = ((h + 0x80000000) & 0xFFFFFFFF) - 0x80000000
+        h = (h << 5) - h + ord(ch)
+        h = h & h
     return abs(h)
-
-
-def _js_mod(a: int, n: int) -> int:
-    """JS-style % which can be negative; Python % already returns non-negative for positive n."""
-    if n == 0:
-        return 0
-    return a % n
 
 
 # ============================================================
@@ -71,11 +60,11 @@ NUMBER_MAP = {
     2: {"size": "SMALL", "validColours": ["RED"], "isViolet": False},
     3: {"size": "SMALL", "validColours": ["GREEN"], "isViolet": False},
     4: {"size": "SMALL", "validColours": ["RED"], "isViolet": False},
-    5: {"size": "BIG", "validColours": ["GREEN", "VIOLET"], "isViolet": True},
-    6: {"size": "BIG", "validColours": ["RED"], "isViolet": False},
-    7: {"size": "BIG", "validColours": ["GREEN"], "isViolet": False},
-    8: {"size": "BIG", "validColours": ["RED"], "isViolet": False},
-    9: {"size": "BIG", "validColours": ["GREEN"], "isViolet": False},
+    5: {"size": "BIG",   "validColours": ["GREEN", "VIOLET"], "isViolet": True},
+    6: {"size": "BIG",   "validColours": ["RED"], "isViolet": False},
+    7: {"size": "BIG",   "validColours": ["GREEN"], "isViolet": False},
+    8: {"size": "BIG",   "validColours": ["RED"], "isViolet": False},
+    9: {"size": "BIG",   "validColours": ["GREEN"], "isViolet": False},
 }
 
 
@@ -89,7 +78,7 @@ def num_meta(n):
 GOKU_500_PATTERNS = {
     "SBSBSBSB": "SMALL", "BSBSBSBS": "BIG", "SBSBSBSBSBS": "BIG", "SBSBSBSBS": "BIG",
     "BSBSBSBSB": "SMALL", "BSBSBSB": "BIG", "SBSBSBS": "SMALL",
-    "BBSBSBSB": "BIG",
+    "BBSBSBSB": "BIG", "SBSBSBSB_": "SMALL",
     "SSBBSBBS": "BIG", "SBB SBBSS".replace(" ", ""): "SMALL",
     "BB SBBSSS".replace(" ", ""): "BIG", "SSBBSBBSSSB": "BIG",
     "SSBSSBBSBBS": "BIG", "SSBBSBB SBS".replace(" ", ""): "BIG",
@@ -102,7 +91,7 @@ GOKU_500_PATTERNS = {
     "SSBBBS SBB B".replace(" ", ""): "BIG", "BB BSSBB BSS".replace(" ", ""): "BIG",
     "SB BBS SBB BS".replace(" ", ""): "BIG", "SSBBBS SBB B SS B".replace(" ", ""): "BIG",
     "BBS BB S S BB B".replace(" ", ""): "SMALL",
-    "SBB SSBB S".replace(" ", ""): "BIG",
+    "SBB SSBB S".replace(" ", ""): "BIG", "BBSSBBSS": "BIG",
     "BSSBB SSB".replace(" ", ""): "SMALL", "SBB SSBB S SBB".replace(" ", ""): "SMALL",
     "BBBBB": "BIG", "BBBBBBBB": "SMALL", "BBBBBS": "BIG", "SBBBBB": "BIG",
     "SSSSS": "SMALL", "SSSSSSSS": "BIG", "SSSSSB": "SMALL", "BSSSSS": "SMALL",
@@ -130,7 +119,6 @@ GOKU_NGRAM = {
 
 
 def match_goku_500(sides_str: str) -> dict:
-    # Longest-prefix match across n-gram first, then rulebook
     for seq in sorted(GOKU_NGRAM.keys(), key=len, reverse=True):
         if sides_str.startswith(seq):
             return {"hit": True, "prediction": GOKU_NGRAM[seq]["prediction"],
@@ -143,9 +131,9 @@ def match_goku_500(sides_str: str) -> dict:
 
 
 # ============================================================
-# §3. GOKU MODES — SPECIAL TRIGGERS
+# §3. GOKU MODES — SPECIAL TRIGGERS (Sn)
 # ============================================================
-def goku_special_triggers(nums: List[int]) -> Optional[dict]:
+def goku_special_triggers(nums) -> Optional[dict]:
     if len(nums) < 2:
         return None
     n0, n1 = nums[0], nums[1]
@@ -161,9 +149,9 @@ def goku_special_triggers(nums: List[int]) -> Optional[dict]:
 
 
 # ============================================================
-# §4. GOKU MODES — TITANIUM COMBO
+# §4. GOKU MODES — TITANIUM COMBO (Cn)
 # ============================================================
-def goku_titanium(nums: List[int], prediction: str) -> dict:
+def goku_titanium(nums, prediction) -> dict:
     color_seq = []
     for n in nums[:30]:
         m = num_meta(n)
@@ -195,9 +183,9 @@ def goku_titanium(nums: List[int], prediction: str) -> dict:
 
 
 # ============================================================
-# §5. GOKU MODES — ZIGZAG & DRAGON
+# §5. GOKU MODES — ZIGZAG 1K (bn) & DRAGON TRACKER (xn)
 # ============================================================
-def goku_zigzag(sides: List[str]) -> dict:
+def goku_zigzag(sides) -> dict:
     s = "".join(sides)
     steps = 1
     for i in range(1, len(sides)):
@@ -224,7 +212,7 @@ def goku_zigzag(sides: List[str]) -> dict:
     }
 
 
-def goku_dragon(sides: List[str]) -> dict:
+def goku_dragon(sides) -> dict:
     head = sides[0]
     count = 1
     for i in range(1, len(sides)):
@@ -255,13 +243,14 @@ def goku_dragon(sides: List[str]) -> dict:
 
 
 # ============================================================
-# §6. GOKU MODES — V12 ZERO-LOSS FORCED REVERSE
+# §6. GOKU MODES — V12 ZERO-LOSS FORCED REVERSE (yn)
 # ============================================================
 V12_STATE = {"consecutiveLoss": 0, "lastPredictedSize": None}
 
 
-def v12_predict(sides: List[str], nums: List[int]) -> dict:
+def v12_predict(sides, nums) -> dict:
     seq = "".join(sides[:6])
+
     if V12_STATE["consecutiveLoss"] >= 1 and V12_STATE["lastPredictedSize"]:
         prediction = flip(V12_STATE["lastPredictedSize"])
         return {
@@ -270,22 +259,20 @@ def v12_predict(sides: List[str], nums: List[int]) -> dict:
             "forcedReverse": True,
             "confidence": 99.2,
         }
+
     if seq.startswith("BBBB") or seq.startswith("SSSS"):
         prediction = "S" if seq.startswith("BBBB") else "B"
-        pattern_name = "V12 DRAGON INFLECTION"
-        confidence = 98.4
+        pattern_name, confidence = "V12 DRAGON INFLECTION", 98.4
     elif seq.startswith("BSBS") or seq.startswith("SBSB"):
         prediction = "S" if seq.startswith("B") else "B"
-        pattern_name = "V12 ZIGZAG HARMONIC"
-        confidence = 97.8
+        pattern_name, confidence = "V12 ZIGZAG HARMONIC", 97.8
     elif seq.startswith("BBSS") or seq.startswith("SSBB"):
         prediction = "B" if seq.startswith("BB") else "S"
-        pattern_name = "V12 DUAL MIRROR"
-        confidence = 97.2
+        pattern_name, confidence = "V12 DUAL MIRROR", 97.2
     else:
         prediction = flip(sides[0])
-        pattern_name = "V12 HARMONIC ACCORD"
-        confidence = 96.5
+        pattern_name, confidence = "V12 HARMONIC ACCORD", 96.5
+
     return {
         "prediction": "BIG" if prediction == "B" else "SMALL",
         "patternName": pattern_name,
@@ -301,17 +288,17 @@ class ModeAI:
     def __init__(self):
         self.mode = "OPPOSITE"
         self.cooldown = 0
-        self.simDirect: List[bool] = []
-        self.simOpposite: List[bool] = []
-        self.log: List[dict] = []
+        self.simDirect = []
+        self.simOpposite = []
+        self.log = []
 
-    def acc(self, arr: List[bool], n: int) -> int:
+    def acc(self, arr, n) -> int:
         s = arr[: min(n, len(arr))]
         if not s:
             return 50
         return round(sum(1 for x in s if x) / len(s) * 100)
 
-    def record_result(self, actual_size: str, ai_raw_pred: str, was_opposite: bool):
+    def record_result(self, actual_size, ai_raw_pred, was_opposite):
         direct_win = ai_raw_pred == actual_size
         opposite_win = ai_raw_pred != actual_size
         self.simDirect.insert(0, direct_win)
@@ -327,11 +314,9 @@ class ModeAI:
         if self.cooldown > 0:
             self.cooldown -= 1
 
-    def decide(self, sides: List[str], streak_len: int, confidence: float) -> str:
+    def decide(self, sides, streak_len, confidence) -> str:
         opp5 = self.acc(self.simOpposite, 5)
         dir5 = self.acc(self.simDirect, 5)
-        opp10 = self.acc(self.simOpposite, 10)
-        dir10 = self.acc(self.simDirect, 10)
         last8 = sides[:8]
         flips = 0
         for i in range(len(last8) - 1):
@@ -375,7 +360,7 @@ class DeepBrain:
         self.totalRecords = 0
         self.numFreq = [0] * 10
         self.sizeFreq = {"BIG": 0, "SMALL": 0}
-        self.transMatrix: Dict[str, int] = {}
+        self.transMatrix = {}
         self.seq2: Dict[str, Dict[str, int]] = {}
         self.seq3: Dict[str, Dict[str, int]] = {}
         self.seq4: Dict[str, Dict[str, int]] = {}
@@ -385,15 +370,15 @@ class DeepBrain:
         self.streakStats = {"BIG": 0, "SMALL": 0, "BIGbreak": 0, "SMALLbreak": 0}
         self.streakLengths = {"BIG": [], "SMALL": []}
         self.bigBias = 0.5
-        self.hotNumbers: List[int] = []
-        self.coldNumbers: List[int] = []
+        self.hotNumbers = []
+        self.coldNumbers = []
         self.ready = False
 
 
 DEEP = DeepBrain()
 
 
-def deep_train(history: List[dict]):
+def deep_train(history):
     ordered = list(reversed(history))
     DEEP.totalRecords = len(ordered)
     sizes = ["BIG" if x["number"] >= 5 else "SMALL" for x in ordered]
@@ -419,7 +404,7 @@ def deep_train(history: List[dict]):
         nxt5 = sizes[i + 5] if i + 5 < len(sizes) else sizes[i + 4]
 
         for store, key, nxt in [(DEEP.seq2, s2, nxt2), (DEEP.seq3, s3, nxt3),
-                                 (DEEP.seq4, s4, nxt4), (DEEP.seq5, s5, nxt5)]:
+                                (DEEP.seq4, s4, nxt4), (DEEP.seq5, s5, nxt5)]:
             if key not in store:
                 store[key] = {"BIG": 0, "SMALL": 0}
             store[key][nxt] += 1
@@ -427,6 +412,8 @@ def deep_train(history: List[dict]):
     for i in range(len(sizes) - 1):
         sz = sizes[i]
         n = nums[i + 1]
+        if sz not in DEEP.numAfterSize:
+            DEEP.numAfterSize[sz] = {}
         DEEP.numAfterSize[sz][n] = DEEP.numAfterSize[sz].get(n, 0) + 1
 
     for i in range(len(nums) - 1):
@@ -451,22 +438,22 @@ def deep_train(history: List[dict]):
     recent_freq = [0] * 10
     for n in recent:
         recent_freq[n] += 1
-    avg = len(recent) / 10 if recent else 0
-    DEEP.hotNumbers = sorted(
-        [n for n in range(10) if recent_freq[n] > avg * 1.15],
-        key=lambda x: recent_freq[x], reverse=True)
-    DEEP.coldNumbers = sorted(
-        [n for n in range(10) if recent_freq[n] < avg * 0.85],
-        key=lambda x: recent_freq[x])
+    avg = len(recent) / 10
+    DEEP.hotNumbers = sorted([n for n in range(10) if recent_freq[n] > avg * 1.15],
+                             key=lambda x: recent_freq[x], reverse=True)
+    DEEP.coldNumbers = sorted([n for n in range(10) if recent_freq[n] < avg * 0.85],
+                              key=lambda x: recent_freq[x])
     DEEP.ready = True
 
 
 # ============================================================
-# §9. RAFSAN — 15-MODEL WEIGHTED SIGNAL
+# §9. RAFSAN — 15-model weighted signal (aiPredict core)
 # ============================================================
-def rafsan_15_model(history: List[dict]) -> dict:
-    sizes = [("BIG" if x["number"] >= 5 else "SMALL") for x in history[:25]]
-    nums = [x["number"] for x in history[:10]]
+def rafsan15_model(history) -> dict:
+    def flip_side(s):
+        return "SMALL" if s == "BIG" else "BIG"
+
+    sizes = ["BIG" if x["number"] >= 5 else "SMALL" for x in history[:25]]
     streak_len = 1
     for i in range(1, len(sizes)):
         if sizes[i] == sizes[0]:
@@ -477,13 +464,10 @@ def rafsan_15_model(history: List[dict]) -> dict:
     votes = {"BIG": 0.0, "SMALL": 0.0}
 
     def add_vote(side, w):
-        if side in ("BIG", "SMALL"):
+        if side == "BIG" or side == "SMALL":
             votes[side] += w
 
-    def flip_side(s):
-        return "SMALL" if s == "BIG" else "BIG"
-
-    # M1-M4 Markov
+    # M1-M4 Markov (seq5 -> seq2)
     key5 = "|".join([s for s in [sizes[4] if len(sizes) > 4 else None,
                                   sizes[3] if len(sizes) > 3 else None,
                                   sizes[2] if len(sizes) > 2 else None,
@@ -522,9 +506,8 @@ def rafsan_15_model(history: List[dict]) -> dict:
     if key2 in DEEP.seq2:
         t = DEEP.seq2[key2]
         tot = t["BIG"] + t["SMALL"]
-        if tot > 0:
-            add_vote("BIG", t["BIG"] / tot * 2)
-            add_vote("SMALL", t["SMALL"] / tot * 2)
+        add_vote("BIG", t["BIG"] / tot * 2)
+        add_vote("SMALL", t["SMALL"] / tot * 2)
 
     # M5 Bayesian
     add_vote("BIG", DEEP.bigBias * 2)
@@ -535,7 +518,7 @@ def rafsan_15_model(history: List[dict]) -> dict:
     tmBS = DEEP.transMatrix.get("BS", 1) or 1
     tmSB = DEEP.transMatrix.get("SB", 1) or 1
     tmSS = DEEP.transMatrix.get("SS", 1) or 1
-    if sizes and sizes[0] == "BIG":
+    if sizes[0] == "BIG":
         t = tmBB + tmBS
         add_vote("BIG", tmBB / t * 1.5)
         add_vote("SMALL", tmBS / t * 1.5)
@@ -545,7 +528,7 @@ def rafsan_15_model(history: List[dict]) -> dict:
         add_vote("SMALL", tmSS / t * 1.5)
 
     # M7 streak intelligence
-    if streak_len >= 3 and sizes:
+    if streak_len >= 3:
         cont = DEEP.streakStats.get(sizes[0], 1) or 1
         brk = DEEP.streakStats.get(sizes[0] + "break", 1) or 1
         cont_rate = cont / (cont + brk)
@@ -557,36 +540,35 @@ def rafsan_15_model(history: List[dict]) -> dict:
             add_vote("SMALL", cont_rate * 1.5)
 
     # M9 recent 10 ratio
-    rec10_big = sum(1 for s in sizes[:10] if s == "BIG")
+    rec10_big = sum(1 for x in sizes[:10] if x == "BIG")
     add_vote("BIG", rec10_big / 10)
     add_vote("SMALL", (10 - rec10_big) / 10)
 
     # M10 last 3 pattern
     last3 = sizes[:3]
-    if len(last3) == 3 and last3[0] == last3[1] == last3[2]:
+    if len(last3) == 3 and last3[0] == last3[1] and last3[1] == last3[2]:
         add_vote(flip_side(last3[0]), 5)
     elif len(last3) == 3 and last3[0] != last3[1] and last3[1] != last3[2]:
         add_vote(flip_side(last3[0]), 4)
 
     # M11 5-result bias
-    rec5_big = sum(1 for s in sizes[:5] if s == "BIG")
+    rec5_big = sum(1 for x in sizes[:5] if x == "BIG")
     if rec5_big >= 4:
         add_vote("SMALL", 5.5)
     elif rec5_big <= 1:
         add_vote("BIG", 5.5)
 
     # M12 streak break
-    if sizes:
-        if streak_len == 2:
-            add_vote(flip_side(sizes[0]), 1.5)
-        elif streak_len == 3:
-            add_vote(flip_side(sizes[0]), 3)
-        elif streak_len == 4:
-            add_vote(flip_side(sizes[0]), 4.5)
-        elif streak_len == 5:
-            add_vote(flip_side(sizes[0]), 6)
-        elif streak_len >= 6:
-            add_vote(flip_side(sizes[0]), 8)
+    if streak_len == 2:
+        add_vote(flip_side(sizes[0]), 1.5)
+    elif streak_len == 3:
+        add_vote(flip_side(sizes[0]), 3)
+    elif streak_len == 4:
+        add_vote(flip_side(sizes[0]), 4.5)
+    elif streak_len == 5:
+        add_vote(flip_side(sizes[0]), 6)
+    elif streak_len >= 6:
+        add_vote(flip_side(sizes[0]), 8)
 
     # M13 flip rate
     last15 = sizes[:15]
@@ -595,22 +577,21 @@ def rafsan_15_model(history: List[dict]) -> dict:
         if last15[i] != last15[i - 1]:
             flips15 += 1
     flip_rate = flips15 / (len(last15) - 1) if len(last15) > 1 else 0.5
-    opp_last15 = flip_side(last15[0]) if last15 else None
-    if opp_last15:
-        if flip_rate >= 0.75:
-            add_vote(opp_last15, 4)
-        elif flip_rate <= 0.3:
-            add_vote(opp_last15, 2.5)
-        else:
-            add_vote(opp_last15, 1.5)
+    opp_last15 = flip_side(last15[0])
+    if flip_rate >= 0.75:
+        add_vote(opp_last15, 4)
+    elif flip_rate <= 0.3:
+        add_vote(opp_last15, 2.5)
+    else:
+        add_vote(opp_last15, 1.5)
 
     # M14 hot/cold
-    if DEEP.ready and DEEP.hotNumbers:
+    if DEEP.ready and len(DEEP.hotNumbers):
         recent_nums15 = [x["number"] for x in history[:15]]
         hot_appear = sum(1 for n in recent_nums15 if n in DEEP.hotNumbers)
-        if hot_appear / 15 > 0.4 and sizes:
+        if hot_appear / 15 > 0.4:
             add_vote(flip_side(sizes[0]), 2.5)
-    if DEEP.ready and DEEP.coldNumbers:
+    if DEEP.ready and len(DEEP.coldNumbers):
         recent_nums10 = [x["number"] for x in history[:10]]
         cold_appear = sum(1 for n in recent_nums10 if n in DEEP.coldNumbers)
         if cold_appear == 0:
@@ -619,7 +600,7 @@ def rafsan_15_model(history: List[dict]) -> dict:
     # M15 first-3
     r3 = sizes[:3]
     if len(r3) == 3:
-        r3big = sum(1 for s in r3 if s == "BIG")
+        r3big = sum(1 for x in r3 if x == "BIG")
         if r3big == 3:
             add_vote("SMALL", 4.5)
         elif r3big == 0:
@@ -641,7 +622,7 @@ def rafsan_15_model(history: List[dict]) -> dict:
 
 
 # ============================================================
-# §10. WEBC0DC V2 — 7-LAYER L1..L7
+# §10. WEBC0DC V2 — 7-layer L1..L7
 # ============================================================
 LAYER_KEYS = ["l1", "l2", "l3", "l4", "l5", "l6", "l7"]
 
@@ -650,8 +631,7 @@ def default_weights() -> Dict[str, float]:
     return {k: 1.0 for k in LAYER_KEYS}
 
 
-def webc0dc7_layer(numbers: List[int], sides: List[str],
-                    weights: Optional[Dict[str, float]] = None) -> dict:
+def webc0dc7_layer(numbers, sides, weights=None) -> dict:
     weights = weights or default_weights()
     layers = []
 
@@ -662,7 +642,7 @@ def webc0dc7_layer(numbers: List[int], sides: List[str],
             streak += 1
         else:
             break
-    if sides:
+    if len(sides):
         head = sides[0]
         reversal = streak >= 4
         layers.append({
@@ -740,6 +720,7 @@ def webc0dc7_layer(numbers: List[int], sides: List[str],
         "strength": min(1, abs(rec) / 4),
     })
 
+    # Weighted (still inside a single pipeline — not external voting)
     B = S = 0.0
     for L in layers:
         if not L["vote"]:
@@ -750,10 +731,7 @@ def webc0dc7_layer(numbers: List[int], sides: List[str],
         else:
             S += w
     total = B + S
-    if total == 0:
-        signal = sides[0] if sides else None
-        confidence = 0
-    elif B == S:
+    if total == 0 or B == S:
         signal = sides[0] if sides else None
         confidence = 0
     else:
@@ -762,8 +740,7 @@ def webc0dc7_layer(numbers: List[int], sides: List[str],
     return {"layers": layers, "signal": signal, "confidence": confidence}
 
 
-def update_weights(current_weights: Dict[str, float], layers_used: List[dict],
-                    actual_side: str) -> Dict[str, float]:
+def update_weights(current_weights, layers_used, actual_side) -> Dict[str, float]:
     nxt = dict(current_weights)
     for L in layers_used:
         if not L.get("vote") or L.get("strength", 0) <= 0:
@@ -774,7 +751,7 @@ def update_weights(current_weights: Dict[str, float], layers_used: List[dict],
 
 
 # ============================================================
-# §11. TUSHAR — UniversalAIDecoder (12 formula types + param search)
+# §11. TUSHAR — UniversalAIDecoder formula types (12) + param search
 # ============================================================
 def _f0(h, p):
     return "B" if abs(h[0]*p[0]+h[1]*p[1]+h[2]*p[2]+h[3]*p[3]+p[4]) % 10 >= 5 else "S"
@@ -785,7 +762,7 @@ def _f1(h, p):
 def _f2(h, p):
     base = max(2, p[0])
     v = (h[0]+1)*(h[1]+1)*(h[2]+1)*(h[3]+1)*p[1]
-    return "B" if abs(v) % base >= base/2 else "S"
+    return "B" if abs(v) % base >= base / 2 else "S"
 
 def _f3(h, p):
     x = ((h[0] ^ p[0]) << p[1]) ^ (h[1] ^ (p[0]+3)) ^ (h[2] << (p[1] % 4)) ^ h[3]
@@ -798,25 +775,25 @@ def _f4(h, p):
 def _f5(h, p):
     c = p[1]
     for i in range(4):
-        c += h[i] * (1 + (i*3) % 10)
-    return "B" if abs(c*p[0]) % 10 >= 5 else "S"
+        c += h[i] * (1 + (i * 3) % 10)
+    return "B" if abs(c * p[0]) % 10 >= 5 else "S"
 
 def _f6(h, p):
-    v = int(((h[0]+h[1]+h[2]+h[3])/4)*p[1] + p[0])
+    v = int(((h[0]+h[1]+h[2]+h[3]) / 4) * p[1] + p[0])
     return "B" if abs(v) % 10 >= 5 else "S"
 
 def _f7(h, p):
-    fib = [0,1,1,2,3,5,8,13,21,34]
+    fib = [0, 1, 1, 2, 3, 5, 8, 13, 21, 34]
     v = 0
     for i in range(4):
-        v += h[i] * fib[((p[0]+i) % 10 + 10) % 10]
-    return "B" if abs(v*p[1]) % 10 >= 5 else "S"
+        v += h[i] * fib[((p[0] + i) % 10 + 10) % 10]
+    return "B" if abs(v * p[1]) % 10 >= 5 else "S"
 
 def _f8(h, p):
-    primes = [2,3,5,7,11,13,17,19,23,29,31,37,41,43,47,53,59,61,67,71]
+    primes = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71]
     pm = primes[((p[0] % len(primes)) + len(primes)) % len(primes)]
     s = h[0]*2 + h[1]*3 + h[2]*5 + h[3]*7 + p[1]
-    return "B" if s % pm >= pm/2 else "S"
+    return "B" if s % pm >= pm / 2 else "S"
 
 def _f9(h, p):
     row = ((p[0] % 3) + 3) % 3
@@ -831,7 +808,7 @@ def _f9(h, p):
     return "B" if abs(v) % 10 >= 5 else "S"
 
 def _f10(h, p):
-    d = (h[0]-h[1])*p[1] + (h[2]-h[3]) + p[0]
+    d = (h[0]-h[1]) * p[1] + (h[2]-h[3]) + p[0]
     return "B" if abs(d) % 10 >= 5 else "S"
 
 def _f11(h, p):
@@ -842,7 +819,7 @@ def _f11(h, p):
 FORMULA_TYPES = [_f0, _f1, _f2, _f3, _f4, _f5, _f6, _f7, _f8, _f9, _f10, _f11]
 
 
-def _param_generator(nums: List[int], sides: List[str], f_idx: int, fetch_num: int):
+def param_generator(nums, sides, f_idx, fetch_num):
     total_sum = sum(nums[:10])
     bs = sum(1 for t in sides if t == "B")
     sets = []
@@ -867,8 +844,7 @@ def _param_generator(nums: List[int], sides: List[str], f_idx: int, fetch_num: i
     yield from sets
 
 
-def tushar_10of10(numbers: List[int], sides: List[str], fetch_num: int) -> dict:
-    import time
+def tushar_10of10(numbers, sides, fetch_num) -> dict:
     t0 = time.time()
     found = False
     final_bs = "BIG"
@@ -878,11 +854,11 @@ def tushar_10of10(numbers: List[int], sides: List[str], fetch_num: int) -> dict:
     for f_idx in range(len(FORMULA_TYPES)):
         if found:
             break
-        for params in _param_generator(numbers, sides, f_idx, fetch_num):
+        for params in param_generator(numbers, sides, f_idx, fetch_num):
             tested += 1
             match_count = 0
             for j in range(10):
-                inp = numbers[j+1:j+5]
+                inp = numbers[j + 1: j + 5]
                 if len(inp) < 4:
                     continue
                 if FORMULA_TYPES[f_idx](inp, params) == sides[j]:
@@ -895,22 +871,25 @@ def tushar_10of10(numbers: List[int], sides: List[str], fetch_num: int) -> dict:
                 final_name = f"FORMULA_{f_idx}"
                 break
     return {
-        "found": found, "signal": final_bs, "name": final_name,
-        "tested": tested, "best": best,
+        "found": found,
+        "signal": final_bs,
+        "name": final_name,
+        "tested": tested,
+        "best": best,
         "elapsedMs": (time.time() - t0) * 1000,
     }
 
 
 # ============================================================
-# §12. apex-engine — trend(3) + pickNumbers
+# §12. apex-engine.js — trend(3) + pickNumbers
 # ============================================================
-def apex_trend(last3_numbers: List[int]) -> str:
+def apex_trend(last3_numbers) -> str:
     trend = [to_side(n) for n in last3_numbers]
     big_count = trend.count("B")
     return "B" if big_count > 1 else "S"
 
 
-def apex_pick_numbers(prediction: str) -> dict:
+def apex_pick_numbers(prediction) -> dict:
     same_pool = BIG_POOL if prediction == "BIG" else SMALL_POOL
     opp_pool = SMALL_POOL if prediction == "BIG" else BIG_POOL
     return {
@@ -922,12 +901,11 @@ def apex_pick_numbers(prediction: str) -> dict:
 # ============================================================
 # §13. Replacement — getPrediction (3:3 / DRAGON / OPPOSITE)
 # ============================================================
-def replacement_prediction(current_number: int, results: List[str],
-                            override: Optional[str] = None) -> dict:
+def replacement_prediction(current_number, results, override=None) -> dict:
     def flip_side(s):
         return "SMALL" if s == "BIG" else "BIG"
 
-    if override in ("BIG", "SMALL"):
+    if override == "BIG" or override == "SMALL":
         return {"pred": override, "mode": "ADMIN FORCE"}
     if not isinstance(results, list) or len(results) < 6:
         return {"pred": "BIG" if current_number <= 4 else "SMALL", "mode": "DEFAULT"}
@@ -955,7 +933,7 @@ NODE_MATRIX = [
 ]
 
 
-def trion_inversion(raw_size: str, raw_color: str) -> dict:
+def trion_inversion(raw_size, raw_color) -> dict:
     r_size = "BIG" if (raw_size or "").upper() == "BIG" else "SMALL"
     r_color = "GREEN" if (raw_color or "").upper() == "GREEN" else "RED"
     predicted_size = "SMALL" if r_size == "BIG" else "BIG"
@@ -972,7 +950,7 @@ def trion_inversion(raw_size: str, raw_color: str) -> dict:
             "number": num, "secondary": sec}
 
 
-def trion_pick4_numbers(size: str, color: str) -> List[int]:
+def trion_pick4_numbers(size, color) -> List[int]:
     size_nums = BIG_POOL if size == "BIG" else SMALL_POOL
     filtered = []
     for n in size_nums:
@@ -998,16 +976,15 @@ def trion_pick4_numbers(size: str, color: str) -> List[int]:
 
 
 # ============================================================
-# §15. WINGO 20-Logic
+# §15. WINGO 20-Logic — calculateBigSmall(20) + calculateRedGreen(20)
 # ============================================================
-def wingo_big_small(numbers: List[int], sides: List[str],
-                     last_digits: List[int]) -> dict:
-    ld = last_digits + [0, 0, 0, 0]
+def wingo_big_small(numbers, sides, last_digits) -> dict:
+    ld = list(last_digits) + [0, 0, 0, 0]
     d1 = ld[-1] if len(last_digits) >= 1 else 0
     d2 = ld[-2] if len(last_digits) >= 2 else 0
     d3 = ld[-3] if len(last_digits) >= 3 else 0
     d4 = ld[-4] if len(last_digits) >= 4 else 0
-    last = numbers[0] if numbers else 0
+    last = numbers[0] if len(numbers) > 0 else 0
     last5 = numbers[:5]
     last3_s = sides[:3]
     results = []
@@ -1029,7 +1006,7 @@ def wingo_big_small(numbers: List[int], sides: List[str],
     push("B" if int((math.sqrt(last if last > 0 else 1) * 10) % 10) >= 5 else "S", 84)
     push("B" if (sum(last5) / max(len(last5), 1)) > 4.5 else "S", 85)
     push("S" if int(math.floor(last * 1.618) % 2) == 0 else "B", 86)
-    push("S" if ((d1 % 2) + (last % 2) == 0) else "B", 87)
+    push("S" if (d1 % 2) + (last % 2) == 0 else "B", 87)
     pat = "".join(last3_s)
     if pat == "BSB":
         push("S", 88)
@@ -1046,9 +1023,8 @@ def wingo_big_small(numbers: List[int], sides: List[str],
     return results[0]
 
 
-def wingo_red_green(numbers: List[int], sides: List[str],
-                     last_digits: List[int]) -> dict:
-    ld = last_digits + [0, 0, 0, 0]
+def wingo_red_green(numbers, sides, last_digits) -> dict:
+    ld = list(last_digits) + [0, 0, 0]
     d1 = ld[-1] if len(last_digits) >= 1 else 0
     d2 = ld[-2] if len(last_digits) >= 2 else 0
     d3 = ld[-3] if len(last_digits) >= 3 else 0
@@ -1089,7 +1065,7 @@ def wingo_red_green(numbers: List[int], sides: List[str],
     push("R" if sum(1 for n in last5 if n % 2 == 0) > 2 else "G", 80)
     push("G" if (n1 % 2) * 3 + (n2 % 2) * 2 + (n3 % 2) >= 3 else "R", 81)
     push("R" if d1 % 2 == 0 else "G", 82)
-    push("R" if (d1 % 2 == 0) == (n1 % 2 == 0) else "G" if n1 % 2 == 0 else "R", 83)
+    push(("R" if n1 % 2 == 0 else "G") if (d1 % 2 == 0) == (n1 % 2 == 0) else ("G" if n1 % 2 == 0 else "R"), 83)
     mod = (n1 + n2 + n3) % 3
     push("G" if mod == 0 else ("R" if mod == 1 else ("G" if n1 % 2 == 0 else "R")), 84)
     push("G" if rs >= 3 else ("R" if gs >= 3 else ("G" if (d1 + d2 + n1) % 4 < 2 else "R")), 85)
@@ -1115,9 +1091,9 @@ def wingo_red_green(numbers: List[int], sides: List[str],
 
 
 # ============================================================
-# §16. NUMBER PREDICTOR
+# §16. NUMBER PREDICTOR (merged from TUSHAR + RAFSAN)
 # ============================================================
-def predict_number_final(numbers: List[int], sides: List[str], target_side: str) -> dict:
+def predict_number_final(numbers, sides, target_side) -> dict:
     scores = [0.0] * 10
     last10 = numbers[:10]
     last20 = numbers[:20]
@@ -1139,10 +1115,11 @@ def predict_number_final(numbers: List[int], sides: List[str], target_side: str)
 
     avg = sum(last10) / len(last10) if last10 else 4.5
     t = round(avg)
-    scores[clamp(t, 0, 9)] += 10
-    scores[clamp(t + 1, 0, 9)] += 7
-    scores[clamp(t - 1, 0, 9)] += 7
+    scores[int(clamp(t, 0, 9))] += 10
+    scores[int(clamp(t + 1, 0, 9))] += 7
+    scores[int(clamp(t - 1, 0, 9))] += 7
 
+    # RAFSAN numAfterNum + numAfterSize
     if len(numbers) >= 2:
         prev = numbers[0]
         for n in range(10):
@@ -1152,16 +1129,40 @@ def predict_number_final(numbers: List[int], sides: List[str], target_side: str)
     for n in pool:
         scores[n] += 5
     sorted_pool = sorted(pool, key=lambda x: scores[x], reverse=True)
-    denom = (scores[sorted_pool[0]] + scores[sorted_pool[1]]) if len(sorted_pool) > 1 else 1
-    conf = int((scores[sorted_pool[0]] / denom if denom else 0) * 100)
-    return {"primary": sorted_pool[0], "secondary": sorted_pool[1] if len(sorted_pool) > 1 else sorted_pool[0],
+    conf = int((scores[sorted_pool[0]] / (scores[sorted_pool[0]] + scores[sorted_pool[1]] or 1)) * 100)
+    return {"primary": sorted_pool[0], "secondary": sorted_pool[1],
             "confidence": conf}
 
 
 # ============================================================
 # §17. THE SINGLE PIPELINE — UPE-X
 # ============================================================
-def predict_unified(history: List[dict], opts: Optional[dict] = None) -> dict:
+def _finalize(signal, confidence, stage, pattern_name, num, numbers, sides, extras=None):
+    extras = extras or {}
+    titanium = extras.get("titanium") or goku_titanium(numbers, "BIG" if signal == "B" else "SMALL")
+    return {
+        "success": True,
+        "prediction": "BIG" if signal == "B" else "SMALL",
+        "predictedNumber": num["primary"],
+        "secondaryNumber": num["secondary"],
+        "confidence": round(confidence),
+        "stage": stage,
+        "pattern": pattern_name,
+        "colorPrediction": titanium["dominantColor"],
+        "targetCluster": titanium["targetNumberCluster"]
+                         if extras.get("titanium")
+                         else ([5, 7, 9] if signal == "B" else [0, 2, 4]),
+        # Diagnostics
+        "diagnostics": extras,
+    }
+
+
+def predict_unified(history, opts=None) -> dict:
+    """
+    @param history: list of {"issueNumber": str|int, "number": int} — newest-first, >= 5 rows
+    @param opts: dict { "weights"?: dict, "adminOverride"?: str, "fetchNum"?: int }
+    @returns unified prediction
+    """
     opts = opts or {}
     if not isinstance(history, list) or len(history) < 5:
         raise ValueError("UPE-X: need >= 5 history rows")
@@ -1173,59 +1174,47 @@ def predict_unified(history: List[dict], opts: Optional[dict] = None) -> dict:
     numbers = [int(h["number"]) for h in history]
     sides = [to_side(n) for n in numbers]
     sides_str = "".join(sides)
-    last_digits = [int(c) for c in str(history[0].get("issueNumber", "")) if c.isdigit()]
+    raw_issue = history[0].get("issueNumber") or ""
+    last_digits = [int(c) for c in str(raw_issue) if c.isdigit()]
     current_number = numbers[0]
 
-    # ── ADMIN OVERRIDE ──
-    if admin_override in ("BIG", "SMALL"):
+    # ── ADMIN OVERRIDE (highest priority — apex/replacement/rafsan modeAI) ──
+    if admin_override == "BIG" or admin_override == "SMALL":
         num = predict_number_final(numbers, sides, "B" if admin_override == "BIG" else "S")
-        return _finalize({
-            "signal": "B" if admin_override == "BIG" else "S",
-            "confidence": 100, "stage": "ADMIN_FORCE",
-            "patternName": "ADMIN_OVERRIDE",
-            "num": num, "numbers": numbers, "sides": sides,
-        })
+        return _finalize("B" if admin_override == "BIG" else "S", 100,
+                         "ADMIN_FORCE", "ADMIN_OVERRIDE", num, numbers, sides)
 
-    # ── STAGE 1: GOKU n-gram / 500-rulebook ──
+    # ── STAGE 1: GOKU n-gram / 500-rulebook (highest base accuracy) ──
     goku500 = match_goku_500(sides_str)
-    if goku500.get("hit") and goku500["strength"] >= 97.5:
+    if goku500["hit"] and goku500["strength"] >= 97.5:
         signal = "B" if goku500["prediction"] == "BIG" else "S"
         num = predict_number_final(numbers, sides, signal)
-        return _finalize({
-            "signal": signal, "confidence": round(goku500["strength"]),
-            "stage": f"GOKU_{goku500['source']}",
-            "patternName": sides_str[:min(8, len(sides_str))],
-            "num": num, "numbers": numbers, "sides": sides,
-        })
+        return _finalize(signal, round(goku500["strength"]),
+                         f"GOKU_{goku500['source']}",
+                         sides_str[: min(8, len(sides_str))], num, numbers, sides)
 
-    # ── STAGE 2: GOKU special triggers ──
+    # ── STAGE 2: GOKU special triggers (double-5 / 9-9 etc.) ──
     special = goku_special_triggers(numbers)
     if special:
         signal = "B" if special["prediction"] == "BIG" else "S"
         num = predict_number_final(numbers, sides, signal)
-        return _finalize({
-            "signal": signal, "confidence": 98.4,
-            "stage": "GOKU_SPECIAL",
-            "patternName": special["reason"],
-            "num": num, "numbers": numbers, "sides": sides,
-        })
+        return _finalize(signal, 98.4, "GOKU_SPECIAL", special["reason"],
+                         num, numbers, sides)
 
     # ── STAGE 3: V12 zero-loss forced reverse ──
     v12 = v12_predict(sides, numbers)
     if v12["forcedReverse"]:
         signal = "B" if v12["prediction"] == "BIG" else "S"
         num = predict_number_final(numbers, sides, signal)
-        return _finalize({
-            "signal": signal, "confidence": 99,
-            "stage": "V12_FORCED", "patternName": v12["patternName"],
-            "num": num, "numbers": numbers, "sides": sides,
-        })
+        return _finalize(signal, 99, "V12_FORCED", v12["patternName"],
+                         num, numbers, sides)
 
-    # ── STAGE 4: RAFSAN 15-model deep AI ──
+    # ── STAGE 4: RAFSAN 15-model deep AI (if trained) ──
     if not DEEP.ready:
         deep_train(history)
-    rafsan = rafsan_15_model(history)
+    rafsan = rafsan15_model(history)
 
+    # Apply modeAI inversion
     mode_decision = MODE_AI.decide(sides, rafsan["streakLen"], rafsan["confidence"])
     rafsan_signal = "B" if rafsan["signal"] == "BIG" else "S"
     if mode_decision == "OPPOSITE":
@@ -1244,7 +1233,7 @@ def predict_unified(history: List[dict], opts: Optional[dict] = None) -> dict:
     # ── STAGE 8: apex trend(3) ──
     apex = apex_trend(numbers[:3])
 
-    # ── STAGE 9: replacement ──
+    # ── STAGE 9: replacement (3:3 / dragon / opposite) ──
     repl = replacement_prediction(current_number, sides, None)
 
     # ── STAGE 10: TRION inversion ──
@@ -1252,35 +1241,42 @@ def predict_unified(history: List[dict], opts: Optional[dict] = None) -> dict:
     raw_color = "RED" if to_color(numbers[0]) == "R" else "GREEN"
     trion = trion_inversion(raw_size, raw_color)
 
-    # ── STAGE 11: WINGO 20-logic ──
+    # ── STAGE 11: WINGO 20-logic big/small ──
     wingo_bs = wingo_big_small(numbers, sides, last_digits)
 
-    # ── SEQUENTIAL FILTER ──
+    # ── SEQUENTIAL FILTER — NOT voting ──
+    # Priority: TUSHAR exact hit > V12 pattern > RAFSAN deep (with modeAI)
+    #           > WEBC0DC > GOKU dragon/zigzag > WINGO 20 > APEX
     chosen = None
     stage = ""
     confidence = 0
     pattern_name = ""
 
+    # (A) TUSHAR exact 10/10 formula -> highest algorithmic certainty
     if tushar["found"]:
         chosen = "B" if tushar["signal"] == "BIG" else "S"
         stage = "TUSHAR_10of10"
         confidence = 97
         pattern_name = tushar["name"]
+    # (B) V12 non-forced pattern
     elif v12["confidence"] >= 97:
         chosen = "B" if v12["prediction"] == "BIG" else "S"
         stage = "V12_PATTERN"
         confidence = v12["confidence"]
         pattern_name = v12["patternName"]
+    # (C) RAFSAN 15-model with modeAI — only if confidence strong
     elif rafsan["confidence"] >= 65:
         chosen = rafsan_signal
         stage = f"RAFSAN_{mode_decision}"
         confidence = rafsan["confidence"]
         pattern_name = f"MODE_{mode_decision}_SEQ{sides_str[:5]}"
+    # (D) WEBC0DC 7-layer — if strong
     elif webc["signal"] and webc["confidence"] >= 60:
         chosen = webc["signal"]
         stage = "WEBC0DC_7L"
         confidence = webc["confidence"]
         pattern_name = f"FLOW_{sides_str[:4]}"
+    # (E) GOKU dragon (mid inflection) or zigzag
     elif dragon["isDragon"] and dragon["reversalProbability"] >= 60:
         chosen = "B" if dragon["expectedSize"] == "BIG" else "S"
         stage = "GOKU_DRAGON"
@@ -1291,18 +1287,20 @@ def predict_unified(history: List[dict], opts: Optional[dict] = None) -> dict:
         stage = "GOKU_ZIGZAG"
         confidence = zigzag["confidence"]
         pattern_name = zigzag["patternType"]
+    # (F) WINGO 20-logic (highest-confidence single function)
     elif wingo_bs:
         chosen = wingo_bs["side"]
         stage = "WINGO_20L"
         confidence = wingo_bs["conf"]
         pattern_name = "WINGO_20LOGIC"
+    # (G) APEX trend(3)
     else:
         chosen = apex
         stage = "APEX_TREND3"
         confidence = 55
         pattern_name = "TREND_3"
 
-    # ── CONFIRMATION BONUS ──
+    # ── CONFIRMATION BONUS: if multiple stages agree ──
     stage_votes = {
         "rafsan": rafsan_signal,
         "webc": webc["signal"],
@@ -1315,55 +1313,38 @@ def predict_unified(history: List[dict], opts: Optional[dict] = None) -> dict:
         "trion": "B" if trion["size"] == "BIG" else "S",
         "v12": "B" if v12["prediction"] == "BIG" else "S",
     }
-    non_null = [v for v in stage_votes.values() if v is not None]
-    agree = sum(1 for v in non_null if v == chosen)
-    total_signals = len(non_null)
+    agree = sum(1 for v in stage_votes.values() if v == chosen)
+    total_signals = sum(1 for v in stage_votes.values() if v is not None)
     if total_signals > 0 and agree >= math.ceil(total_signals * 0.6):
         confidence = clamp(confidence + 6, 0, 99)
 
     num = predict_number_final(numbers, sides, chosen)
+
+    # ── Titanium combo (enriched output) ──
     titanium = goku_titanium(numbers, "BIG" if chosen == "B" else "SMALL")
 
-    return _finalize({
-        "signal": chosen, "confidence": confidence,
-        "stage": stage, "patternName": pattern_name,
-        "num": num, "numbers": numbers, "sides": sides,
-        "extras": {
-            "rafsan": rafsan, "modeDecision": mode_decision,
-            "webc": webc, "tushar": tushar, "dragon": dragon,
-            "zigzag": zigzag, "apex": apex, "repl": repl,
-            "trion": trion, "wingoBS": wingo_bs, "v12": v12,
-            "titanium": titanium, "goku500": goku500,
-            "layersUsed": webc["layers"],
-        },
+    return _finalize(chosen, confidence, stage, pattern_name, num, numbers, sides, extras={
+        "rafsan": rafsan,
+        "modeDecision": mode_decision,
+        "webc": webc,
+        "tushar": tushar,
+        "dragon": dragon,
+        "zigzag": zigzag,
+        "apex": apex,
+        "repl": repl,
+        "trion": trion,
+        "wingoBS": wingo_bs,
+        "v12": v12,
+        "titanium": titanium,
+        "goku500": goku500,
+        "layersUsed": webc["layers"],
     })
-
-
-def _finalize(d: dict) -> dict:
-    signal = d["signal"]
-    num = d["num"]
-    numbers = d["numbers"]
-    extras = d.get("extras", {})
-    titanium = extras.get("titanium") or goku_titanium(numbers, "BIG" if signal == "B" else "SMALL")
-    return {
-        "success": True,
-        "prediction": "BIG" if signal == "B" else "SMALL",
-        "predictedNumber": num["primary"],
-        "secondaryNumber": num["secondary"],
-        "confidence": round(d["confidence"]),
-        "stage": d["stage"],
-        "pattern": d["patternName"],
-        "colorPrediction": titanium["dominantColor"],
-        "targetCluster": extras.get("titanium", {}).get("targetNumberCluster")
-                          or ([5, 7, 9] if signal == "B" else [0, 2, 4]),
-        "diagnostics": extras,
-    }
 
 
 # ============================================================
 # §18. FEEDBACK — update weights after actual result
 # ============================================================
-def record_outcome(actual_number: int, opts: Optional[dict] = None) -> Dict[str, float]:
+def record_outcome(actual_number, opts=None) -> Dict[str, float]:
     opts = opts or {}
     actual_side = to_side(actual_number)
     layers = opts.get("layers") or []
@@ -1383,74 +1364,31 @@ def record_outcome(actual_number: int, opts: Optional[dict] = None) -> Dict[str,
 
 
 # ============================================================
-# §19. PUBLIC API WRAPPER (matches original export shape)
+# §19. EXPORTS (Python equivalent of module.exports)
 # ============================================================
-def sddgamer263_predict(current_number: int = 0, period: str = "",
-                         history: Optional[List[dict]] = None) -> dict:
-    """Public wrapper — accepts same signature as the original engine."""
-    if history is None:
-        history = []
-    if not history:
-        history = [{"number": current_number,
-                    "size": "BIG" if current_number >= 5 else "SMALL"}]
-    # Need >= 5 rows — pad with derived fallback if short
-    if len(history) < 5:
-        pad = generate_fallback_history()
-        combined = list(history) + pad
-        history = combined[: max(len(history), 5)]
-        # ensure newest-first; already so
-    result = predict_unified(history)
-    return {
-        "bigSmall": result["prediction"],
-        "prediction": result["predictedNumber"],
-        "confidence": float(result["confidence"]),
-        "numbers": [result["predictedNumber"], result["secondaryNumber"]],
-        "steps": [],
-        "source": result["stage"],
-        "patternName": result["pattern"],
-        "period": period,
-        "ultimateMaster": True,
-        "ultimateAgreement": result["confidence"],
-        "ultimateBigVotes": 1 if result["prediction"] == "BIG" else 0,
-        "ultimateSmallVotes": 1 if result["prediction"] == "SMALL" else 0,
-        "ultimateTotalVotes": 1,
-        "reason": result["pattern"],
-        "scanStatus": result["stage"],
-        "trapDefenseMode": "UPE_X",
-    }
-
+__all__ = [
+    "predict_unified", "record_outcome", "deep_train",
+    "DEEP", "MODE_AI", "V12_STATE",
+    "default_weights", "update_weights",
+    "to_side", "flip", "to_color", "NUMBER_MAP",
+]
 
 # ============================================================
-# §20. FALLBACK HISTORY (used only if caller gives < 5 rows)
+# §20. USAGE
 # ============================================================
-def _fnv_hash(s: str) -> int:
-    h = 2166136261
-    for ch in s:
-        h ^= ord(ch)
-        h = (h * 16777619) & 0xFFFFFFFF
-    h = (h ^ (h >> 16)) * 2246822507 & 0xFFFFFFFF
-    h = (h ^ (h >> 13)) * 3266489909 & 0xFFFFFFFF
-    h ^= h >> 16
-    return abs(h) % 10
-
-
-def generate_fallback_history(mode: str = "1m") -> List[dict]:
-    now = datetime.now(timezone.utc)
-    day = f"{now.year}{now.month:02d}{now.day:02d}"
-    minute_of_day = now.hour * 60 + now.minute
-    out = []
-    for i in range(30):
-        m = minute_of_day - i
-        d = day
-        if m < 1:
-            m += 1440
-            prev = now - timedelta(days=1)
-            d = f"{prev.year}{prev.month:02d}{prev.day:02d}"
-        period = f"{d}{str(m).zfill(4)}"
-        num = _fnv_hash(period)
-        size = "BIG" if num >= 5 else "SMALL"
-        out.append({
-            "issueNumber": period, "number": num, "size": size,
-            "timestamp": int(datetime.now().timestamp() * 1000) - i * 60000,
-        })
-    return out
+if __name__ == "__main__":
+    import json
+    history = [
+        {"issueNumber": "202601011200", "number": 7},
+        {"issueNumber": "202601011159", "number": 3},
+        {"issueNumber": "202601011158", "number": 8},
+        {"issueNumber": "202601011157", "number": 2},
+        {"issueNumber": "202601011156", "number": 9},
+        {"issueNumber": "202601011155", "number": 5},
+        {"issueNumber": "202601011154", "number": 1},
+        {"issueNumber": "202601011153", "number": 6},
+        {"issueNumber": "202601011152", "number": 0},
+        {"issueNumber": "202601011151", "number": 4},
+    ]
+    out = predict_unified(history)
+    print(json.dumps({k: v for k, v in out.items() if k != "diagnostics"}, indent=2))
