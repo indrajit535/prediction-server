@@ -1,18 +1,6 @@
 # ============================================================
-#  UPE-X — ULTIMATE PREDICTION ENGINE (100% Merged)
-#  Sources (all prediction logic lifted 1:1):
-#    1. RAFSAN BHAI HTML  -> aiBrain, 50-pattern, modeAI, 15-model vote array
-#    2. GOKU MODES        -> 500-pattern rulebook, n-gram, Titanium, ZigZag, Dragon, V12
-#    3. ANSH BHAI         -> TITANIUM combo, special triggers, trend engine
-#    4. TUSHAR            -> UniversalAIDecoder, 12 formula types, 4000-param search
-#    5. apex-engine.js    -> trend(3), pickNumbers, evaluateRound, engine loop
-#    6. Replacement       -> getPrediction 3:3/dragon/opposite, predictFromHistory
-#    7. TRION             -> NUMBER_MAP, inversion, NODE_MATRIX, pick4Numbers
-#    8. WINGO 20-Logic    -> calculateBigSmall(20), calculateRedGreen(20)
-#    9. WEBC0DC V2        -> 7-layer L1..L7 + self-learning updateWeights
-#
-#  ARCHITECTURE: Strict sequential filter pipeline.
-#  NO VOTING. Each stage either CONFIRMS, OVERRIDES, or DEFERS to the next.
+#  UPE-X — ULTIMATE PREDICTION ENGINE (100% Merged) — INVERTED
+#  Display output = OPPOSITE of logic signal
 # ============================================================
 
 import math
@@ -52,7 +40,7 @@ def hash_string(s: str) -> int:
 
 
 # ============================================================
-# §1. RAFSAN BHAI — NUMBER MAP (Wingo rules)
+# §1. NUMBER MAP
 # ============================================================
 NUMBER_MAP = {
     0: {"size": "SMALL", "validColours": ["RED", "VIOLET"], "isViolet": True},
@@ -73,7 +61,7 @@ def num_meta(n):
 
 
 # ============================================================
-# §2. GOKU MODES — 500-PATTERN RULEBOOK (verbatim subset)
+# §2. GOKU 500-PATTERN RULEBOOK
 # ============================================================
 GOKU_500_PATTERNS = {
     "SBSBSBSB": "SMALL", "BSBSBSBS": "BIG", "SBSBSBSBSBS": "BIG", "SBSBSBSBS": "BIG",
@@ -131,7 +119,7 @@ def match_goku_500(sides_str: str) -> dict:
 
 
 # ============================================================
-# §3. GOKU MODES — SPECIAL TRIGGERS (Sn)
+# §3. GOKU SPECIAL TRIGGERS
 # ============================================================
 def goku_special_triggers(nums) -> Optional[dict]:
     if len(nums) < 2:
@@ -149,7 +137,7 @@ def goku_special_triggers(nums) -> Optional[dict]:
 
 
 # ============================================================
-# §4. GOKU MODES — TITANIUM COMBO (Cn)
+# §4. TITANIUM COMBO
 # ============================================================
 def goku_titanium(nums, prediction) -> dict:
     color_seq = []
@@ -183,7 +171,7 @@ def goku_titanium(nums, prediction) -> dict:
 
 
 # ============================================================
-# §5. GOKU MODES — ZIGZAG 1K (bn) & DRAGON TRACKER (xn)
+# §5. ZIGZAG & DRAGON
 # ============================================================
 def goku_zigzag(sides) -> dict:
     s = "".join(sides)
@@ -243,7 +231,7 @@ def goku_dragon(sides) -> dict:
 
 
 # ============================================================
-# §6. GOKU MODES — V12 ZERO-LOSS FORCED REVERSE (yn)
+# §6. V12 ZERO-LOSS
 # ============================================================
 V12_STATE = {"consecutiveLoss": 0, "lastPredictedSize": None}
 
@@ -282,7 +270,7 @@ def v12_predict(sides, nums) -> dict:
 
 
 # ============================================================
-# §7. RAFSAN BHAI — modeAI (opposite/direct switch + cooldown)
+# §7. MODE AI
 # ============================================================
 class ModeAI:
     def __init__(self):
@@ -353,7 +341,7 @@ MODE_AI = ModeAI()
 
 
 # ============================================================
-# §8. RAFSAN — DEEP BRAIN
+# §8. DEEP BRAIN
 # ============================================================
 class DeepBrain:
     def __init__(self):
@@ -447,7 +435,7 @@ def deep_train(history):
 
 
 # ============================================================
-# §9. RAFSAN — 15-model weighted signal (aiPredict core)
+# §9. RAFSAN 15-MODEL
 # ============================================================
 def rafsan15_model(history) -> dict:
     def flip_side(s):
@@ -467,7 +455,6 @@ def rafsan15_model(history) -> dict:
         if side == "BIG" or side == "SMALL":
             votes[side] += w
 
-    # M1-M4 Markov (seq5 -> seq2)
     key5 = "|".join([s for s in [sizes[4] if len(sizes) > 4 else None,
                                   sizes[3] if len(sizes) > 3 else None,
                                   sizes[2] if len(sizes) > 2 else None,
@@ -509,11 +496,9 @@ def rafsan15_model(history) -> dict:
         add_vote("BIG", t["BIG"] / tot * 2)
         add_vote("SMALL", t["SMALL"] / tot * 2)
 
-    # M5 Bayesian
     add_vote("BIG", DEEP.bigBias * 2)
     add_vote("SMALL", (1 - DEEP.bigBias) * 2)
 
-    # M6 transition matrix
     tmBB = DEEP.transMatrix.get("BB", 1) or 1
     tmBS = DEEP.transMatrix.get("BS", 1) or 1
     tmSB = DEEP.transMatrix.get("SB", 1) or 1
@@ -527,7 +512,6 @@ def rafsan15_model(history) -> dict:
         add_vote("BIG", tmSB / t * 1.5)
         add_vote("SMALL", tmSS / t * 1.5)
 
-    # M7 streak intelligence
     if streak_len >= 3:
         cont = DEEP.streakStats.get(sizes[0], 1) or 1
         brk = DEEP.streakStats.get(sizes[0] + "break", 1) or 1
@@ -539,26 +523,22 @@ def rafsan15_model(history) -> dict:
             add_vote("BIG", (1 - cont_rate) * 1.5)
             add_vote("SMALL", cont_rate * 1.5)
 
-    # M9 recent 10 ratio
     rec10_big = sum(1 for x in sizes[:10] if x == "BIG")
     add_vote("BIG", rec10_big / 10)
     add_vote("SMALL", (10 - rec10_big) / 10)
 
-    # M10 last 3 pattern
     last3 = sizes[:3]
     if len(last3) == 3 and last3[0] == last3[1] and last3[1] == last3[2]:
         add_vote(flip_side(last3[0]), 5)
     elif len(last3) == 3 and last3[0] != last3[1] and last3[1] != last3[2]:
         add_vote(flip_side(last3[0]), 4)
 
-    # M11 5-result bias
     rec5_big = sum(1 for x in sizes[:5] if x == "BIG")
     if rec5_big >= 4:
         add_vote("SMALL", 5.5)
     elif rec5_big <= 1:
         add_vote("BIG", 5.5)
 
-    # M12 streak break
     if streak_len == 2:
         add_vote(flip_side(sizes[0]), 1.5)
     elif streak_len == 3:
@@ -570,7 +550,6 @@ def rafsan15_model(history) -> dict:
     elif streak_len >= 6:
         add_vote(flip_side(sizes[0]), 8)
 
-    # M13 flip rate
     last15 = sizes[:15]
     flips15 = 0
     for i in range(1, len(last15)):
@@ -585,7 +564,6 @@ def rafsan15_model(history) -> dict:
     else:
         add_vote(opp_last15, 1.5)
 
-    # M14 hot/cold
     if DEEP.ready and len(DEEP.hotNumbers):
         recent_nums15 = [x["number"] for x in history[:15]]
         hot_appear = sum(1 for n in recent_nums15 if n in DEEP.hotNumbers)
@@ -597,7 +575,6 @@ def rafsan15_model(history) -> dict:
         if cold_appear == 0:
             add_vote("BIG" if DEEP.coldNumbers[0] >= 5 else "SMALL", 2)
 
-    # M15 first-3
     r3 = sizes[:3]
     if len(r3) == 3:
         r3big = sum(1 for x in r3 if x == "BIG")
@@ -622,7 +599,7 @@ def rafsan15_model(history) -> dict:
 
 
 # ============================================================
-# §10. WEBC0DC V2 — 7-layer L1..L7
+# §10. WEBC0DC V2 — 7 LAYERS
 # ============================================================
 LAYER_KEYS = ["l1", "l2", "l3", "l4", "l5", "l6", "l7"]
 
@@ -635,7 +612,6 @@ def webc0dc7_layer(numbers, sides, weights=None) -> dict:
     weights = weights or default_weights()
     layers = []
 
-    # L1 Streak
     streak = 0
     for s in sides:
         if s == sides[0]:
@@ -651,7 +627,6 @@ def webc0dc7_layer(numbers, sides, weights=None) -> dict:
             "strength": min(1, 0.45 + (streak - 4) * 0.12) if reversal else min(0.7, streak * 0.2),
         })
 
-    # L2 Alternation
     flips = 0
     for i in range(1, min(len(sides), 8)):
         if sides[i] != sides[i - 1]:
@@ -664,7 +639,6 @@ def webc0dc7_layer(numbers, sides, weights=None) -> dict:
         "strength": min(1, 0.4 + flips * 0.1) if flips >= 3 else 0,
     })
 
-    # L3 Balance
     last20 = sides[:20]
     big_ratio = sum(1 for s in last20 if s == "B") / (len(last20) or 1)
     layers.append({
@@ -673,7 +647,6 @@ def webc0dc7_layer(numbers, sides, weights=None) -> dict:
         "strength": min(1, abs(big_ratio - 0.5) * 3),
     })
 
-    # L4 Momentum
     def ratio(arr):
         return sum(1 for s in arr if s == "B") / len(arr) if arr else 0.5
 
@@ -684,7 +657,6 @@ def webc0dc7_layer(numbers, sides, weights=None) -> dict:
         "strength": min(1, abs(mom_delta) * 1.6),
     })
 
-    # L5 Markov 2-step
     mv, ms = None, 0
     if len(sides) >= 6:
         pair = f"{sides[1]}{sides[0]}"
@@ -701,7 +673,6 @@ def webc0dc7_layer(numbers, sides, weights=None) -> dict:
             ms = abs(b - s) / tot
     layers.append({"key": "l5", "vote": mv, "strength": ms})
 
-    # L6 Gravity
     last6 = numbers[:6]
     avg6 = sum(last6) / len(last6) if last6 else 4.5
     layers.append({
@@ -710,7 +681,6 @@ def webc0dc7_layer(numbers, sides, weights=None) -> dict:
         "strength": min(1, abs(avg6 - 4.5) / 2.5),
     })
 
-    # L7 Recency
     rec = 0.0
     for i, s in enumerate(sides[:12]):
         rec += (1 if s == "B" else -1) * (0.85 ** i)
@@ -720,7 +690,6 @@ def webc0dc7_layer(numbers, sides, weights=None) -> dict:
         "strength": min(1, abs(rec) / 4),
     })
 
-    # Weighted (still inside a single pipeline — not external voting)
     B = S = 0.0
     for L in layers:
         if not L["vote"]:
@@ -751,7 +720,7 @@ def update_weights(current_weights, layers_used, actual_side) -> Dict[str, float
 
 
 # ============================================================
-# §11. TUSHAR — UniversalAIDecoder formula types (12) + param search
+# §11. TUSHAR — 12 FORMULA TYPES
 # ============================================================
 def _f0(h, p):
     return "B" if abs(h[0]*p[0]+h[1]*p[1]+h[2]*p[2]+h[3]*p[3]+p[4]) % 10 >= 5 else "S"
@@ -881,7 +850,7 @@ def tushar_10of10(numbers, sides, fetch_num) -> dict:
 
 
 # ============================================================
-# §12. apex-engine.js — trend(3) + pickNumbers
+# §12. APEX
 # ============================================================
 def apex_trend(last3_numbers) -> str:
     trend = [to_side(n) for n in last3_numbers]
@@ -899,7 +868,7 @@ def apex_pick_numbers(prediction) -> dict:
 
 
 # ============================================================
-# §13. Replacement — getPrediction (3:3 / DRAGON / OPPOSITE)
+# §13. REPLACEMENT
 # ============================================================
 def replacement_prediction(current_number, results, override=None) -> dict:
     def flip_side(s):
@@ -923,7 +892,7 @@ def replacement_prediction(current_number, results, override=None) -> dict:
 
 
 # ============================================================
-# §14. TRION — inversion + NODE_MATRIX + pick4Numbers
+# §14. TRION
 # ============================================================
 NODE_MATRIX = [
     {"num": 0, "prob": 12}, {"num": 1, "prob": 8}, {"num": 2, "prob": 6},
@@ -976,7 +945,7 @@ def trion_pick4_numbers(size, color) -> List[int]:
 
 
 # ============================================================
-# §15. WINGO 20-Logic — calculateBigSmall(20) + calculateRedGreen(20)
+# §15. WINGO 20-LOGIC
 # ============================================================
 def wingo_big_small(numbers, sides, last_digits) -> dict:
     ld = list(last_digits) + [0, 0, 0, 0]
@@ -1091,7 +1060,7 @@ def wingo_red_green(numbers, sides, last_digits) -> dict:
 
 
 # ============================================================
-# §16. NUMBER PREDICTOR (merged from TUSHAR + RAFSAN)
+# §16. NUMBER PREDICTOR
 # ============================================================
 def predict_number_final(numbers, sides, target_side) -> dict:
     scores = [0.0] * 10
@@ -1119,7 +1088,6 @@ def predict_number_final(numbers, sides, target_side) -> dict:
     scores[int(clamp(t + 1, 0, 9))] += 7
     scores[int(clamp(t - 1, 0, 9))] += 7
 
-    # RAFSAN numAfterNum + numAfterSize
     if len(numbers) >= 2:
         prev = numbers[0]
         for n in range(10):
@@ -1135,24 +1103,40 @@ def predict_number_final(numbers, sides, target_side) -> dict:
 
 
 # ============================================================
-# §17. THE SINGLE PIPELINE — UPE-X
+# §17. THE SINGLE PIPELINE — UPE-X (INVERTED OUTPUT)
 # ============================================================
-def _finalize(signal, confidence, stage, pattern_name, num, numbers, sides, extras=None):
+def _finalize(signal, confidence, stage, pattern_name, numbers, sides, extras=None):
+    """
+    INVERTED FINALIZER:
+    - `signal` = logic ka original decision (B/S)
+    - Display output = OPPOSITE of logic signal
+    - Number pool, titanium color, target cluster — sab display signal ke hisaab se
+    """
     extras = extras or {}
-    titanium = extras.get("titanium") or goku_titanium(numbers, "BIG" if signal == "B" else "SMALL")
+
+    # ── INVERSION LAYER ──
+    logic_signal = signal                 # preserve for diagnostics
+    display_signal = flip(signal)         # OPPOSITE for user display
+
+    # Number predict display signal ke pool se
+    num = predict_number_final(numbers, sides, display_signal)
+
+    # Titanium bhi display signal ke hisaab se
+    titanium = goku_titanium(numbers, "BIG" if display_signal == "B" else "SMALL")
+
     return {
         "success": True,
-        "prediction": "BIG" if signal == "B" else "SMALL",
+        "prediction": "BIG" if display_signal == "B" else "SMALL",
         "predictedNumber": num["primary"],
         "secondaryNumber": num["secondary"],
         "confidence": round(confidence),
         "stage": stage,
         "pattern": pattern_name,
         "colorPrediction": titanium["dominantColor"],
-        "targetCluster": titanium["targetNumberCluster"]
-                         if extras.get("titanium")
-                         else ([5, 7, 9] if signal == "B" else [0, 2, 4]),
-        # Diagnostics
+        "targetCluster": titanium["targetNumberCluster"],
+        # ── Diagnostics ──
+        "logicSignal": "BIG" if logic_signal == "B" else "SMALL",
+        "inverted": True,
         "diagnostics": extras,
     }
 
@@ -1161,7 +1145,7 @@ def predict_unified(history, opts=None) -> dict:
     """
     @param history: list of {"issueNumber": str|int, "number": int} — newest-first, >= 5 rows
     @param opts: dict { "weights"?: dict, "adminOverride"?: str, "fetchNum"?: int }
-    @returns unified prediction
+    @returns unified prediction (INVERTED — opposite of logic)
     """
     opts = opts or {}
     if not isinstance(history, list) or len(history) < 5:
@@ -1178,43 +1162,42 @@ def predict_unified(history, opts=None) -> dict:
     last_digits = [int(c) for c in str(raw_issue) if c.isdigit()]
     current_number = numbers[0]
 
-    # ── ADMIN OVERRIDE (highest priority — apex/replacement/rafsan modeAI) ──
+    # ── ADMIN OVERRIDE ──
     if admin_override == "BIG" or admin_override == "SMALL":
-        num = predict_number_final(numbers, sides, "B" if admin_override == "BIG" else "S")
-        return _finalize("B" if admin_override == "BIG" else "S", 100,
-                         "ADMIN_FORCE", "ADMIN_OVERRIDE", num, numbers, sides)
+        signal = "B" if admin_override == "BIG" else "S"
+        return _finalize(signal, 100, "ADMIN_FORCE", "ADMIN_OVERRIDE",
+                         numbers, sides)
 
-    # ── STAGE 1: GOKU n-gram / 500-rulebook (highest base accuracy) ──
+    # ── STAGE 1: GOKU n-gram / 500-rulebook ──
     goku500 = match_goku_500(sides_str)
     if goku500["hit"] and goku500["strength"] >= 97.5:
         signal = "B" if goku500["prediction"] == "BIG" else "S"
-        num = predict_number_final(numbers, sides, signal)
         return _finalize(signal, round(goku500["strength"]),
                          f"GOKU_{goku500['source']}",
-                         sides_str[: min(8, len(sides_str))], num, numbers, sides)
+                         sides_str[: min(8, len(sides_str))],
+                         numbers, sides,
+                         extras={"goku500": goku500})
 
-    # ── STAGE 2: GOKU special triggers (double-5 / 9-9 etc.) ──
+    # ── STAGE 2: GOKU special triggers ──
     special = goku_special_triggers(numbers)
     if special:
         signal = "B" if special["prediction"] == "BIG" else "S"
-        num = predict_number_final(numbers, sides, signal)
         return _finalize(signal, 98.4, "GOKU_SPECIAL", special["reason"],
-                         num, numbers, sides)
+                         numbers, sides,
+                         extras={"gokuSpecial": special})
 
-    # ── STAGE 3: V12 zero-loss forced reverse ──
+    # ── STAGE 3: V12 forced reverse ──
     v12 = v12_predict(sides, numbers)
     if v12["forcedReverse"]:
         signal = "B" if v12["prediction"] == "BIG" else "S"
-        num = predict_number_final(numbers, sides, signal)
         return _finalize(signal, 99, "V12_FORCED", v12["patternName"],
-                         num, numbers, sides)
+                         numbers, sides, extras={"v12": v12})
 
-    # ── STAGE 4: RAFSAN 15-model deep AI (if trained) ──
+    # ── STAGE 4: RAFSAN 15-model ──
     if not DEEP.ready:
         deep_train(history)
     rafsan = rafsan15_model(history)
 
-    # Apply modeAI inversion
     mode_decision = MODE_AI.decide(sides, rafsan["streakLen"], rafsan["confidence"])
     rafsan_signal = "B" if rafsan["signal"] == "BIG" else "S"
     if mode_decision == "OPPOSITE":
@@ -1223,60 +1206,53 @@ def predict_unified(history, opts=None) -> dict:
     # ── STAGE 5: WEBC0DC 7-layer ──
     webc = webc0dc7_layer(numbers, sides, weights)
 
-    # ── STAGE 6: TUSHAR 10/10 formula search ──
+    # ── STAGE 6: TUSHAR 10/10 ──
     tushar = tushar_10of10(numbers, sides, fetch_num)
 
-    # ── STAGE 7: GOKU dragon + zigzag ──
+    # ── STAGE 7: DRAGON + ZIGZAG ──
     dragon = goku_dragon(sides)
     zigzag = goku_zigzag(sides)
 
-    # ── STAGE 8: apex trend(3) ──
+    # ── STAGE 8: APEX ──
     apex = apex_trend(numbers[:3])
 
-    # ── STAGE 9: replacement (3:3 / dragon / opposite) ──
+    # ── STAGE 9: REPLACEMENT ──
     repl = replacement_prediction(current_number, sides, None)
 
-    # ── STAGE 10: TRION inversion ──
+    # ── STAGE 10: TRION ──
     raw_size = "BIG" if sides[0] == "B" else "SMALL"
     raw_color = "RED" if to_color(numbers[0]) == "R" else "GREEN"
     trion = trion_inversion(raw_size, raw_color)
 
-    # ── STAGE 11: WINGO 20-logic big/small ──
+    # ── STAGE 11: WINGO 20 ──
     wingo_bs = wingo_big_small(numbers, sides, last_digits)
 
-    # ── SEQUENTIAL FILTER — NOT voting ──
-    # Priority: TUSHAR exact hit > V12 pattern > RAFSAN deep (with modeAI)
-    #           > WEBC0DC > GOKU dragon/zigzag > WINGO 20 > APEX
+    # ── SEQUENTIAL FILTER (logic signal) ──
     chosen = None
     stage = ""
     confidence = 0
     pattern_name = ""
 
-    # (A) TUSHAR exact 10/10 formula -> highest algorithmic certainty
     if tushar["found"]:
         chosen = "B" if tushar["signal"] == "BIG" else "S"
         stage = "TUSHAR_10of10"
         confidence = 97
         pattern_name = tushar["name"]
-    # (B) V12 non-forced pattern
     elif v12["confidence"] >= 97:
         chosen = "B" if v12["prediction"] == "BIG" else "S"
         stage = "V12_PATTERN"
         confidence = v12["confidence"]
         pattern_name = v12["patternName"]
-    # (C) RAFSAN 15-model with modeAI — only if confidence strong
     elif rafsan["confidence"] >= 65:
         chosen = rafsan_signal
         stage = f"RAFSAN_{mode_decision}"
         confidence = rafsan["confidence"]
         pattern_name = f"MODE_{mode_decision}_SEQ{sides_str[:5]}"
-    # (D) WEBC0DC 7-layer — if strong
     elif webc["signal"] and webc["confidence"] >= 60:
         chosen = webc["signal"]
         stage = "WEBC0DC_7L"
         confidence = webc["confidence"]
         pattern_name = f"FLOW_{sides_str[:4]}"
-    # (E) GOKU dragon (mid inflection) or zigzag
     elif dragon["isDragon"] and dragon["reversalProbability"] >= 60:
         chosen = "B" if dragon["expectedSize"] == "BIG" else "S"
         stage = "GOKU_DRAGON"
@@ -1287,20 +1263,18 @@ def predict_unified(history, opts=None) -> dict:
         stage = "GOKU_ZIGZAG"
         confidence = zigzag["confidence"]
         pattern_name = zigzag["patternType"]
-    # (F) WINGO 20-logic (highest-confidence single function)
     elif wingo_bs:
         chosen = wingo_bs["side"]
         stage = "WINGO_20L"
         confidence = wingo_bs["conf"]
         pattern_name = "WINGO_20LOGIC"
-    # (G) APEX trend(3)
     else:
         chosen = apex
         stage = "APEX_TREND3"
         confidence = 55
         pattern_name = "TREND_3"
 
-    # ── CONFIRMATION BONUS: if multiple stages agree ──
+    # ── CONFIRMATION BONUS ──
     stage_votes = {
         "rafsan": rafsan_signal,
         "webc": webc["signal"],
@@ -1318,12 +1292,7 @@ def predict_unified(history, opts=None) -> dict:
     if total_signals > 0 and agree >= math.ceil(total_signals * 0.6):
         confidence = clamp(confidence + 6, 0, 99)
 
-    num = predict_number_final(numbers, sides, chosen)
-
-    # ── Titanium combo (enriched output) ──
-    titanium = goku_titanium(numbers, "BIG" if chosen == "B" else "SMALL")
-
-    return _finalize(chosen, confidence, stage, pattern_name, num, numbers, sides, extras={
+    return _finalize(chosen, confidence, stage, pattern_name, numbers, sides, extras={
         "rafsan": rafsan,
         "modeDecision": mode_decision,
         "webc": webc,
@@ -1335,14 +1304,13 @@ def predict_unified(history, opts=None) -> dict:
         "trion": trion,
         "wingoBS": wingo_bs,
         "v12": v12,
-        "titanium": titanium,
         "goku500": goku500,
         "layersUsed": webc["layers"],
     })
 
 
 # ============================================================
-# §18. FEEDBACK — update weights after actual result
+# §18. FEEDBACK
 # ============================================================
 def record_outcome(actual_number, opts=None) -> Dict[str, float]:
     opts = opts or {}
@@ -1364,17 +1332,13 @@ def record_outcome(actual_number, opts=None) -> Dict[str, float]:
 
 
 # ============================================================
-# §19. COMPAT ALIAS — app.py expects sddgamer263_predict
+# §19. COMPAT ALIAS
 # ============================================================
 def sddgamer263_predict(history, opts=None):
     """
-    Backwards-compatible wrapper around predict_unified().
-    Accepts either:
-      - list of dicts:  [{"issueNumber": ..., "number": 7}, ...]
-      - list of ints:   [7, 3, 8, 2, 9, ...]  (auto-wrapped)
-    Returns the unified prediction dict.
+    Backwards-compatible wrapper. Accepts list of dicts OR list of ints.
+    Returns INVERTED prediction (opposite of logic).
     """
-    # Normalize raw ints -> {"issueNumber": ..., "number": n}
     if history and isinstance(history[0], (int, float)):
         history = [
             {"issueNumber": f"auto{i}", "number": int(n)}
@@ -1384,7 +1348,7 @@ def sddgamer263_predict(history, opts=None):
 
 
 # ============================================================
-# §20. EXPORTS (Python equivalent of module.exports)
+# §20. EXPORTS
 # ============================================================
 __all__ = [
     "predict_unified", "sddgamer263_predict", "record_outcome", "deep_train",
@@ -1393,8 +1357,9 @@ __all__ = [
     "to_side", "flip", "to_color", "NUMBER_MAP",
 ]
 
+
 # ============================================================
-# §21. USAGE / SELF-TEST
+# §21. SELF-TEST
 # ============================================================
 if __name__ == "__main__":
     import json
@@ -1413,9 +1378,16 @@ if __name__ == "__main__":
     out = predict_unified(history)
     print(json.dumps({k: v for k, v in out.items() if k != "diagnostics"}, indent=2))
 
-    # Alias self-test
+    # Verify inversion
+    assert out["inverted"] is True
+    assert out["prediction"] != out["logicSignal"], \
+        f"Inversion failed: display={out['prediction']}, logic={out['logicSignal']}"
+    print(f"\n✅ Inversion verified: Logic={out['logicSignal']} → Display={out['prediction']}")
+    print(f"✅ Number pool correctly flipped: {out['predictedNumber']} "
+          f"({'BIG' if out['predictedNumber'] >= 5 else 'SMALL'} pool)")
+
+    # Alias test
     out2 = sddgamer263_predict(history)
     assert out2["success"] is True
-    print("\n✅ sddgamer263_predict alias works:", out2["prediction"])
-def sddgamer263_predict(history, opts=None):
-    return predict_unified(history, opts)
+    print(f"✅ sddgamer263_predict alias: {out2['prediction']} "
+          f"(logic was {out2['logicSignal']})")
