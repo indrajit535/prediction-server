@@ -13,7 +13,7 @@
 #
 #  ARCHITECTURE: Strict sequential filter pipeline.
 #  NO VOTING. Each stage either CONFIRMS, OVERRIDES, or DEFERS to the next.
-#  ============================================================
+# ============================================================
 
 import math
 import random
@@ -1364,17 +1364,37 @@ def record_outcome(actual_number, opts=None) -> Dict[str, float]:
 
 
 # ============================================================
-# §19. EXPORTS (Python equivalent of module.exports)
+# §19. COMPAT ALIAS — app.py expects sddgamer263_predict
+# ============================================================
+def sddgamer263_predict(history, opts=None):
+    """
+    Backwards-compatible wrapper around predict_unified().
+    Accepts either:
+      - list of dicts:  [{"issueNumber": ..., "number": 7}, ...]
+      - list of ints:   [7, 3, 8, 2, 9, ...]  (auto-wrapped)
+    Returns the unified prediction dict.
+    """
+    # Normalize raw ints -> {"issueNumber": ..., "number": n}
+    if history and isinstance(history[0], (int, float)):
+        history = [
+            {"issueNumber": f"auto{i}", "number": int(n)}
+            for i, n in enumerate(history)
+        ]
+    return predict_unified(history, opts)
+
+
+# ============================================================
+# §20. EXPORTS (Python equivalent of module.exports)
 # ============================================================
 __all__ = [
-    "predict_unified", "record_outcome", "deep_train",
+    "predict_unified", "sddgamer263_predict", "record_outcome", "deep_train",
     "DEEP", "MODE_AI", "V12_STATE",
     "default_weights", "update_weights",
     "to_side", "flip", "to_color", "NUMBER_MAP",
 ]
 
 # ============================================================
-# §20. USAGE
+# §21. USAGE / SELF-TEST
 # ============================================================
 if __name__ == "__main__":
     import json
@@ -1392,3 +1412,8 @@ if __name__ == "__main__":
     ]
     out = predict_unified(history)
     print(json.dumps({k: v for k, v in out.items() if k != "diagnostics"}, indent=2))
+
+    # Alias self-test
+    out2 = sddgamer263_predict(history)
+    assert out2["success"] is True
+    print("\n✅ sddgamer263_predict alias works:", out2["prediction"])
